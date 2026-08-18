@@ -476,6 +476,7 @@ FodyWeavers.xsd
 build/
 Build/
 build-*/
+local_build_win.bat
 
 # CMake generated files
 CMakeFiles/
