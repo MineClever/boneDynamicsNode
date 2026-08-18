@@ -353,7 +353,7 @@ set "DIRNAME=build/win64_%MAYA_VERSION%"
 call :GetBuildSettings "%MAYA_VERSION%"
 if errorlevel 1 (
     echo.
-    echo [SKIP] Maya %MAYA_VERSION% is outside this project's supported range (2022-2027).
+    echo [SKIP] Maya %MAYA_VERSION% is outside this project's supported range ^(2019-2027^).
     exit /b 2
 )
 
