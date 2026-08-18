@@ -1,9 +1,14 @@
-from typing import Dict, Tuple, Sequence, Any
 import traceback
 import functools
 import re
 
 from maya import cmds
+
+try:
+    string_types = (basestring,)
+except NameError:
+    string_types = (str,)
+
 
 # decorator
 def undo_chunk(func):
@@ -24,26 +29,28 @@ def with_traceback(func):
         try:
             return func(*args, **kwargs)
         except Exception:
-            print(f"Error occurred in '{func.__name__}'")
+            print("Error occurred in '{}'".format(func.__name__))
             traceback.print_exc()
             raise
     return wrapper
 
 
 # utils
-def load_plugin(*args) -> bool:
+def load_plugin(*args):
+    # type: (*object) -> bool
     try:
         result = cmds.loadPlugin("boneDynamicsNode.mll", qt=True)
         if result is not None:
             plugin_ver = cmds.pluginInfo("boneDynamicsNode.mll", q=True, version=True)
-            print(f"Plugin loaded successfully. Version: {plugin_ver}")
+            print("Plugin loaded successfully. Version: {}".format(plugin_ver))
         return True
     except Exception as e:
-        print(f"Error loading plugin: {e}")
+        print("Error loading plugin: {}".format(e))
         return False
 
 
-def get_fps(*args) -> float:
+def get_fps(*args):
+    # type: (*object) -> float
     time_unit = cmds.currentUnit(q=True, time=True)
     fps_match = re.match(r'^([0-9]+(?:\.[0-9]+)?)fps$', time_unit)
     if fps_match:
@@ -63,20 +70,21 @@ def get_fps(*args) -> float:
     return fps_mapping.get(time_unit, 30.0)
 
 
-def create_shape_node(node_name: str, *args) -> Tuple[str, str]:
-    
+def create_shape_node(node_name, *args):
+    # type: (str, *object) -> Tuple[str, str]
+
     def _unique_name(name):
         i = 1
         while True:
-            if cmds.objExists(f'{name}{i}'):
+            if cmds.objExists('{}{}'.format(name, i)):
                 i += 1
             else:
                 break
-        return f'{name}{i}'
+        return '{}{}'.format(name, i)
 
     transform_unique_name = _unique_name(node_name)
 
-    shape = cmds.createNode(node_name, name=_unique_name(f"{node_name}Shape"))
+    shape = cmds.createNode(node_name, name=_unique_name('{}Shape'.format(node_name)))
     transform_fullpath = cmds.listRelatives(shape, p=True, f=True)[0]
     transform = transform_fullpath.split('|')[-1]
 
@@ -89,54 +97,59 @@ def create_shape_node(node_name: str, *args) -> Tuple[str, str]:
     return transform, shape
 
 
-def set_attributes(node: str, **attributes: Dict[str, Any]) -> None:
+def set_attributes(node, **attributes):
+    # type: (str, **Any) -> None
     for at, v in attributes.items():
         if not cmds.attributeQuery(at, n=node, ex=True):
-            print(f"Attribute does not exist: {node}.{at}")
+            print("Attribute does not exist: {}.{}".format(node, at))
             continue
         try:
-            if type(v) == str:
-                cmds.setAttr(f"{node}.{at}", v, type="string")
-            
+            if isinstance(v, string_types):
+                cmds.setAttr("{}.{}".format(node, at), v, type="string")
+
             elif (type(v) == list or type(v) == tuple) and len(v) >= 3:
-                cmds.setAttr(f"{node}.{at}", v[0], v[1], v[2], type="double3")
-            
+                cmds.setAttr("{}.{}".format(node, at), v[0], v[1], v[2], type="double3")
+
             else:
-                cmds.setAttr(f"{node}.{at}", v)
+                cmds.setAttr("{}.{}".format(node, at), v)
         except:
-            print(f"Failed to set attribute: {node}.{at}")
+            print("Failed to set attribute: {}.{}".format(node, at))
 
 
-def set_outliner_color(node: str, color: Sequence[float], *args) -> None:
-    cmds.setAttr(f'{node}.useOutlinerColor', True)
-    cmds.setAttr(f'{node}.outlinerColor', color[0], color[1], color[2])
+def set_outliner_color(node, color, *args):
+    # type: (str, Sequence[float], *object) -> None
+    cmds.setAttr('{}.useOutlinerColor'.format(node), True)
+    cmds.setAttr('{}.outlinerColor'.format(node), color[0], color[1], color[2])
 
 
-def set_override_display_color(node: str, color_idx: int, *args) -> None:
-    cmds.setAttr(f'{node}.overrideEnabled', True)
-    cmds.setAttr(f'{node}.overrideRGBColors', False)
-    cmds.setAttr(f'{node}.overrideColor', color_idx)
+def set_override_display_color(node, color_idx, *args):
+    # type: (str, int, *object) -> None
+    cmds.setAttr('{}.overrideEnabled'.format(node), True)
+    cmds.setAttr('{}.overrideRGBColors'.format(node), False)
+    cmds.setAttr('{}.overrideColor'.format(node), color_idx)
 
 
-def set_override_display_type(node: str, type: str, *args) -> None:
+def set_override_display_type(node, type, *args):
+    # type: (str, str, *object) -> None
     if type == 'Reference':
         display_type = 2
     elif type == 'Template':
         display_type = 1
-    else :
+    else:
         display_type = 0
 
     set_override_display_color(node, 0)
-    cmds.setAttr(f'{node}.overrideDisplayType', display_type)
+    cmds.setAttr('{}.overrideDisplayType'.format(node), display_type)
 
 
-def add_object_to_set(obj: str, set_name: str, *args) -> None:
-    
+def add_object_to_set(obj, set_name, *args):
+    # type: (str, str, *object) -> None
+
     if not set_name:
         return
-    
+
     if not cmds.objExists(set_name):
         cmds.select(cl=True)
         cmds.sets(name=set_name)
-    
+
     cmds.sets(obj, add=set_name)

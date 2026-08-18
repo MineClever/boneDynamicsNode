@@ -1,5 +1,3 @@
-from typing import List, Sequence, Optional, Union
-
 from maya import cmds
 
 from . import utils, collider, visualize
@@ -8,19 +6,20 @@ from . import utils, collider, visualize
 @utils.with_traceback
 @utils.undo_chunk
 def create_dynamics_node(
-        bone: str, 
-        end: str, 
-        scalable: bool = False, 
-        target_bone: Optional[str] = None, 
-        connect_target_scale: Optional[bool] = False,
-        offset_node: Optional[str] = None, 
-        create_visualizer: bool = False,
-        colliders: Optional[Union[str, Sequence[str]]] = None,
-        additional_force_node: Optional[str] = None,
-        additional_force_init_vec: Sequence[float] = (0, 0, -1),
-        set_name: str = 'boneDynamicsNodeSet',
+        bone,
+        end,
+        scalable=False,
+        target_bone=None,
+        connect_target_scale=False,
+        offset_node=None,
+        create_visualizer=False,
+        colliders=None,
+        additional_force_node=None,
+        additional_force_init_vec=(0, 0, -1),
+        set_name='boneDynamicsNodeSet',
         **kwargs
-    ) -> str:
+    ):
+    # type: (str, str, bool, Optional[str], Optional[bool], Optional[str], bool, Optional[Union[str, Sequence[str]]], Optional[str], Sequence[float], str, **object) -> str
     """Create and connect a boneDynamicsNode for a joint section.
 
     Args:
@@ -29,7 +28,7 @@ def create_dynamics_node(
         scalable: Connect scale attributes when the joint should per-section scaling.
         target_bone: Optional node whose drives the rotation offset.
         connect_target_scale: Connect the scale from target_bone to bone.
-            If the target pose is controlled using a duplicate joint, it is convenient 
+            If the target pose is controlled using a duplicate joint, it is convenient
             to connect the scale from the duplicate joint as well.
         offset_node: Optional node whose offsets the simulation space.
         create_visualizer: Create and connect a visualizer.
@@ -46,7 +45,7 @@ def create_dynamics_node(
     # load plugin
     if not utils.load_plugin():
         raise RuntimeError("Failed to load boneDynamicsNode plugin.")
-    
+
     # validate input
     if cmds.nodeType(bone) != 'joint' or cmds.nodeType(end) != 'joint':
         raise ValueError("Exit: Both bone and end must be joints.")
@@ -55,13 +54,13 @@ def create_dynamics_node(
     bone_full_paths = cmds.ls(bone, l=True) or []
     bone_path = bone_full_paths[0] if bone_full_paths else bone
     end_parents = cmds.listRelatives(end, p=True, f=True)
-    
+
     if not end_parents:
-        raise ValueError(f"Exit: {end} has no parent.")
-    
+        raise ValueError("Exit: {} has no parent.".format(end))
+
     if bone_path not in end_parents:
-        raise ValueError(f"Exit: {bone} is not {end}'s parent.")
-    
+        raise ValueError("Exit: {} is not {}'s parent.".format(bone, end))
+
     # create boneDynamicsNode and set attributes
     bone_dynamics_node = cmds.createNode("boneDynamicsNode")
     attributes = dict(kwargs)
@@ -70,30 +69,30 @@ def create_dynamics_node(
     utils.set_attributes(bone_dynamics_node, **attributes)
 
     # basic connections
-    cmds.connectAttr('time1.outTime', f'{bone_dynamics_node}.time', f=True)
-    cmds.connectAttr(f'{bone}.translate', f'{bone_dynamics_node}.boneTranslate', f=True)
-    cmds.connectAttr(f'{bone}.parentMatrix[0]', f'{bone_dynamics_node}.boneParentMatrix', f=True)
-    cmds.connectAttr(f'{bone}.parentInverseMatrix[0]', f'{bone_dynamics_node}.boneParentInverseMatrix', f=True)
-    cmds.connectAttr(f'{bone}.jointOrient', f'{bone_dynamics_node}.boneJointOrient', f=True)
-    cmds.connectAttr(f'{end}.translate', f'{bone_dynamics_node}.endTranslate', f=True)
-    cmds.connectAttr(f'{bone_dynamics_node}.outputRotate', f'{bone}.rotate', f=True)
+    cmds.connectAttr('time1.outTime', '{}.time'.format(bone_dynamics_node), f=True)
+    cmds.connectAttr('{}.translate'.format(bone), '{}.boneTranslate'.format(bone_dynamics_node), f=True)
+    cmds.connectAttr('{}.parentMatrix[0]'.format(bone), '{}.boneParentMatrix'.format(bone_dynamics_node), f=True)
+    cmds.connectAttr('{}.parentInverseMatrix[0]'.format(bone), '{}.boneParentInverseMatrix'.format(bone_dynamics_node), f=True)
+    cmds.connectAttr('{}.jointOrient'.format(bone), '{}.boneJointOrient'.format(bone_dynamics_node), f=True)
+    cmds.connectAttr('{}.translate'.format(end), '{}.endTranslate'.format(bone_dynamics_node), f=True)
+    cmds.connectAttr('{}.outputRotate'.format(bone_dynamics_node), '{}.rotate'.format(bone), f=True)
 
     if scalable:
-        cmds.connectAttr(f'{bone}.scale', f'{bone_dynamics_node}.boneScale', f=True)
-        cmds.connectAttr(f'{bone}.inverseScale', f'{bone_dynamics_node}.boneInverseScale', f=True)
-        cmds.connectAttr(f'{end}.scale', f'{bone_dynamics_node}.endScale', f=True)
+        cmds.connectAttr('{}.scale'.format(bone), '{}.boneScale'.format(bone_dynamics_node), f=True)
+        cmds.connectAttr('{}.inverseScale'.format(bone), '{}.boneInverseScale'.format(bone_dynamics_node), f=True)
+        cmds.connectAttr('{}.scale'.format(end), '{}.endScale'.format(bone_dynamics_node), f=True)
 
     # additional connections
     if target_bone and cmds.objExists(target_bone):
-        cmds.connectAttr(f'{target_bone}.rotate', f'{bone_dynamics_node}.rotationOffset', f=True)
+        cmds.connectAttr('{}.rotate'.format(target_bone), '{}.rotationOffset'.format(bone_dynamics_node), f=True)
         if connect_target_scale:
-            cmds.connectAttr(f'{target_bone}.scale', f'{bone}.scale', f=True)
+            cmds.connectAttr('{}.scale'.format(target_bone), '{}.scale'.format(bone), f=True)
 
     if offset_node and cmds.objExists(offset_node):
-        cmds.connectAttr(f'{offset_node}.worldMatrix[0]', f'{bone_dynamics_node}.offsetMatrix', f=True)
+        cmds.connectAttr('{}.worldMatrix[0]'.format(offset_node), '{}.offsetMatrix'.format(bone_dynamics_node), f=True)
 
     if additional_force_node and cmds.objExists(additional_force_node):
-        vp = cmds.listConnections(f'{additional_force_node}.worldMatrix[0]', s=False, d=True, type='vectorProduct')
+        vp = cmds.listConnections('{}.worldMatrix[0]'.format(additional_force_node), s=False, d=True, type='vectorProduct')
         if vp:
             vp = vp[0]
         else:
@@ -104,16 +103,16 @@ def create_dynamics_node(
                 "normalizeOutput": 1,
             }
             utils.set_attributes(vp, **attrs)
-            cmds.connectAttr(f'{additional_force_node}.worldMatrix[0]', f'{vp}.matrix', f=True)
-        cmds.connectAttr(f'{vp}.output', f'{bone_dynamics_node}.additionalForce', f=True)
-    
+            cmds.connectAttr('{}.worldMatrix[0]'.format(additional_force_node), '{}.matrix'.format(vp), f=True)
+        cmds.connectAttr('{}.output'.format(vp), '{}.additionalForce'.format(bone_dynamics_node), f=True)
+
     # visualizer
     if create_visualizer:
         visualize.create_visualizer(bone_dynamics_node)
 
     # colliders
     if colliders is not None:
-        if isinstance(colliders, str):
+        if isinstance(colliders, utils.string_types):
             colliders = [colliders]
         else:
             colliders = list(colliders)
@@ -122,5 +121,5 @@ def create_dynamics_node(
     # add to object set
     if set_name:
         utils.add_object_to_set(bone_dynamics_node, set_name)
-    
+
     return bone_dynamics_node
