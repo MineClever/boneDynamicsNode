@@ -10,8 +10,13 @@
 
 namespace colliderGeometry
 {
-    ColliderDrawData::ColliderDrawData() : MUserData(),
-        color(1.0f, 1.0f, 1.0f), 
+    ColliderDrawData::ColliderDrawData()
+#if MAYA_API_VERSION >= 20220000
+        : MUserData(),
+#else
+        : MUserData(false),
+#endif
+        color(1.0f, 1.0f, 1.0f),
         depthPriority(MHWRender::MRenderItem::sDormantWireDepthPriority)
     {}
 

@@ -20,7 +20,9 @@ public:
     
     static void* creator();
     virtual SchedulingType schedulingType() const;
+#if MAYA_API_VERSION >= 20220000
     void getCacheSetup(const MEvaluationNode& evalNode, MNodeCacheDisablingInfo& disablingInfo, MNodeCacheSetupInfo& cacheSetupInfo, MObjectArray& monitoredAttributes) const override;
+#endif
 
     static MStatus initialize();
     MStatus compute(const MPlug& plug, MDataBlock& data) override;

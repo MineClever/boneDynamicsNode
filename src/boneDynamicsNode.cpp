@@ -368,6 +368,7 @@ boneDynamicsNode::SchedulingType boneDynamicsNode::schedulingType() const
     return kParallel;
 }
 
+#if MAYA_API_VERSION >= 20220000
 void boneDynamicsNode::getCacheSetup(const MEvaluationNode& evalNode, MNodeCacheDisablingInfo& disablingInfo, MNodeCacheSetupInfo& cacheSetupInfo, MObjectArray& monitoredAttributes) const
 {
     bool enabled = false;
@@ -386,6 +387,7 @@ void boneDynamicsNode::getCacheSetup(const MEvaluationNode& evalNode, MNodeCache
 
     monitoredAttributes.append(s_enable);
 }
+#endif
 
 MStatus boneDynamicsNode::initialize()
 {

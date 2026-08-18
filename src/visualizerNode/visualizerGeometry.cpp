@@ -21,7 +21,12 @@ namespace
 
 namespace visualizerGeometry
 {
-    VisualizerDrawData::VisualizerDrawData() : MUserData(),
+    VisualizerDrawData::VisualizerDrawData()
+#if MAYA_API_VERSION >= 20220000
+        : MUserData(),
+#else
+        : MUserData(false),
+#endif
         color(1.0f, 1.0f, 1.0f),
         depthPriority(MHWRender::MRenderItem::sDormantWireDepthPriority)
     {}
