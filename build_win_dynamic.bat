@@ -38,6 +38,13 @@ if errorlevel 1 (
     goto :Finish
 )
 
+call :SelectBuildConfiguration
+if errorlevel 2 goto :Finish
+if errorlevel 1 (
+    set "EXIT_CODE=1"
+    goto :Finish
+)
+
 if /i "%BUILD_MODE%"=="installed-maya" (
     call :BuildSelectedMaya
     if errorlevel 1 set "EXIT_CODE=1"
@@ -196,6 +203,37 @@ if defined GENERATOR (
 
 echo [ERROR] Enter a number from the menu.
 goto :GeneratorMenu
+
+
+:: ============================================
+:: Select the CMake build configuration.
+
+:SelectBuildConfiguration
+set "BUILD_CONFIGURATION="
+
+:BuildConfigurationMenu
+echo.
+echo Available build configurations:
+echo   [1] Release
+echo   [2] Debug
+echo   [0] Cancel
+echo.
+set "BUILD_CONFIGURATION_CHOICE="
+set /p "BUILD_CONFIGURATION_CHOICE=Select build configuration (Enter = [1]): "
+if errorlevel 1 exit /b 2
+
+if "!BUILD_CONFIGURATION_CHOICE!"=="" set "BUILD_CONFIGURATION_CHOICE=1"
+if "!BUILD_CONFIGURATION_CHOICE!"=="0" exit /b 2
+if "!BUILD_CONFIGURATION_CHOICE!"=="1" set "BUILD_CONFIGURATION=Release"
+if "!BUILD_CONFIGURATION_CHOICE!"=="2" set "BUILD_CONFIGURATION=Debug"
+
+if defined BUILD_CONFIGURATION (
+    echo Selected build configuration: !BUILD_CONFIGURATION!
+    exit /b 0
+)
+
+echo [ERROR] Enter a number from the menu.
+goto :BuildConfigurationMenu
 
 
 :: ============================================
@@ -382,6 +420,7 @@ if defined MAYA_LIBRARY_DIR (
     echo LIBRARY_DIR=Resolved automatically from the Devkit
 )
 echo BUILD_DIR=%DIRNAME%
+echo BUILD_CONFIGURATION=%BUILD_CONFIGURATION%
 echo TOOLSET=%MSVC%
 echo CXX_STANDARD_VER=%CXX_STANDARD_VER%
 echo ========================================
@@ -393,7 +432,7 @@ if defined MAYA_LIBRARY_DIR (
 )
 if errorlevel 1 exit /b 1
 
-cmake --build "%DIRNAME%"
+cmake --build "%DIRNAME%" --config "%BUILD_CONFIGURATION%"
 if errorlevel 1 exit /b 1
 
 exit /b 0
