@@ -7,7 +7,7 @@ global proc AEboneDynamicsNodeTemplate(string $nodeName)
             editorTemplate -addControl "enable";
             editorTemplate -addControl "time";
             editorTemplate -addControl "resetTime";
-            editorTemplate -label "FPS" -addControl "fps";
+            editorTemplate -label "Simulation Time Scale" -addControl "timeScale";
 
             editorTemplate -beginLayout "Input Attributes" -collapse false;
                 editorTemplate -addControl "boneTranslate";

@@ -16,27 +16,18 @@
 
 #include <limits>    // std::numeric_limits
 #include <algorithm> // std::max, std::min
+#include <cmath>     // std::exp, std::ceil
 #include <vector>    // std::vector
 
 namespace
 {
     constexpr double kCapsuleMinThreshold = 0.1;
 
-    /*double getFPS()
-    {
-        float fps = 24.0f;
-        MTime::Unit unit = MTime::uiUnit();
-        if (unit != MTime::kInvalid)
-        {
-            MTime time(1.0, MTime::kSeconds);
-            fps = static_cast<float>(time.as(unit));
-        }
-        if (fps <= 0.f)
-        {
-            fps = 24.0f;
-        }
-        return fps;
-    }*/
+    // deltaTime sub-stepping (fixed internal defaults, not exposed)
+    constexpr double kSubStepDt = 1.0 / 240.0;              // fixed substep duration in seconds
+    constexpr int kMaxSubSteps = 16;                        // max catch-up substeps per evaluation (~66.7 ms, covers 15 fps and above)
+    constexpr double kMaxCatchUpSec = kSubStepDt * kMaxSubSteps; // max catch-up duration in seconds
+    constexpr double kRefFps = 30.0;                        // reference fps for turbulence scaling
 
     void angleLimit(const MVector& pivot, const MVector& a, MVector& b, const double limitAngle)
     {
@@ -280,7 +271,7 @@ MObject boneDynamicsNode::s_enable;
 
 MObject boneDynamicsNode::s_time;
 MObject boneDynamicsNode::s_resetTime;
-MObject boneDynamicsNode::s_fps;
+MObject boneDynamicsNode::s_timeScale;
 
 MObject boneDynamicsNode::s_offsetMatrix;
 MObject boneDynamicsNode::s_offsetMatrixWeight;
@@ -349,7 +340,7 @@ MObject boneDynamicsNode::s_meshColCutoff;
 
 MObject boneDynamicsNode::s_outputRotate;
 
-boneDynamicsNode::boneDynamicsNode() : m_isSimulationInitialized(false), m_lastSeed(-1), m_lastFrame(-1) {
+boneDynamicsNode::boneDynamicsNode() : m_isSimulationInitialized(false), m_hasPrevTime(false), m_lastSeed(-1), m_turbStep(0) {
     m_rngState[0] = 0;
     m_rngState[1] = 0;
     m_rngState[2] = 0;
@@ -417,9 +408,9 @@ MStatus boneDynamicsNode::initialize()
     s_resetTime = uAttr.create("resetTime", "rt", MFnUnitAttribute::kTime, 0.0);
     uAttr.setKeyable(true);
 
-    s_fps = nAttr.create("fps", "fps", MFnNumericData::kDouble, 30.0);
+    s_timeScale = nAttr.create("timeScale", "ts", MFnNumericData::kDouble, 1.0);
     nAttr.setKeyable(true);
-    nAttr.setMin(1);
+    nAttr.setMin(0);
 
     // input attributes
     s_offsetMatrix = mAttr.create("offsetMatrix", "ofmtx");
@@ -479,10 +470,9 @@ MStatus boneDynamicsNode::initialize()
     nAttr.setKeyable(true);
 
     // dynamics attributes
-    s_damping = nAttr.create("damping", "damp", MFnNumericData::kDouble, 0.1);
+    s_damping = nAttr.create("damping", "damp", MFnNumericData::kDouble, 3.0); // per-second velocity decay rate (1/s)
     nAttr.setKeyable(true);
     nAttr.setMin(0);
-    nAttr.setMax(1);
 
     s_elasticity = nAttr.create("elasticity", "elas", MFnNumericData::kDouble, 30.0);
     nAttr.setKeyable(true);
@@ -677,7 +667,7 @@ MStatus boneDynamicsNode::initialize()
 
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_time));
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_resetTime));
-    CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_fps));
+    CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_timeScale));
 
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_offsetMatrix));
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_offsetMatrixWeight));
@@ -738,7 +728,7 @@ MStatus boneDynamicsNode::initialize()
 
         s_time,
         s_resetTime,
-        s_fps,
+        s_timeScale,
 
         s_offsetMatrix,
         s_offsetMatrixWeight,
@@ -900,127 +890,84 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     // time
     const MTime time = data.inputValue(s_time).asTime();
     const MTime resetTime = data.inputValue(s_resetTime).asTime();
-    
-    // reset and initialization
-    if (time <= resetTime || !m_isSimulationInitialized) {
+
+    // reset simulation state
+    auto resetSimulation = [&]() {
         m_prevOffsetMatrix = initialPose.offsetMatrix;
         m_position = initialPose.endWorldTranslate;
         m_velocity = MVector();
         m_isSimulationInitialized = true;
+        m_prevTime = time;
+        m_hasPrevTime = true;
+        m_turbStep = 0;
 
         if (dynamicsParams.enableTurbulence) {
             m_turbulenceVector = MVector();
             m_turbulenceVectorChange = MVector();
             m_lastSeed = -1;
-            m_lastFrame = -1;
             m_rngState[0] = 0;
             m_rngState[1] = 0;
             m_rngState[2] = 0;
             m_rngState[3] = 0;
         }
+    };
 
+    auto outputInitialRotation = [&]() {
         outputRotateHandle.set3Double(
-            initialPose.rotationOffsetEuler.x, 
-            initialPose.rotationOffsetEuler.y, 
+            initialPose.rotationOffsetEuler.x,
+            initialPose.rotationOffsetEuler.y,
             initialPose.rotationOffsetEuler.z
         );
+    };
+
+    // reset and initialization
+    if (time <= resetTime || !m_isSimulationInitialized) {
+        resetSimulation();
+        outputInitialRotation();
         CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
-        
+
         return MS::kSuccess;
     }
 
-    // delta time
-    //double dt = 1.0 / getFPS();
-    const double fps = data.inputValue(s_fps).asDouble();
-    const double dt = 1.0 / fps;
-    const double dt2 = dt * dt;
+    // delta time (seconds) from scene time, scaled by the user multiplier
+    const double timeScale = data.inputValue(s_timeScale).asDouble();
+    const double dtTotal = (time - m_prevTime).as(MTime::kSeconds) * timeScale;
 
-    // position offset
-    const MPoint offsetedPosition = MPoint(m_position) * m_prevOffsetMatrix.inverse() * initialPose.offsetMatrix;
-    m_position = MVector(offsetedPosition) * initialPose.offsetMatrixWeight + m_position * (1.0 - initialPose.offsetMatrixWeight);
-    
-    // velocity damping
-    m_velocity *= (1.0 - dynamicsParams.damping);
-    
-    // add velocity
-    MVector nextPosition = m_position + (m_velocity * dt);
+    // backward jump (scrub left) or gap beyond the catch-up cap: reset to the current pose
+    if (!m_hasPrevTime || time < m_prevTime || dtTotal > kMaxCatchUpSec) {
+        resetSimulation();
+        outputInitialRotation();
+        CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
 
-    // turbulence vector
-    if (dynamicsParams.enableTurbulence) {
-        int frame = static_cast<int>(time.as(MTime::uiUnit()));
-
-        if (dynamicsParams.turbulenceSeed != m_lastSeed || frame != m_lastFrame) {
-
-            // Init xoshiro128++
-            std::uint32_t s = static_cast<std::uint32_t>(dynamicsParams.turbulenceSeed) ^ (static_cast<std::uint32_t>(frame) * 0x9e3779b9u);
-            for (int i = 0; i < 4; ++i) {
-                s = s * 1664525u + 1013904223u;
-                m_rngState[i] = s;
-            }
-            m_lastSeed = dynamicsParams.turbulenceSeed;
-            m_lastFrame = frame;
-        }
-        
-        m_turbulenceVectorChange += MVector(
-            mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale),
-            mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale),
-            mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale)
-        );
-
-        m_turbulenceVectorChange.x = std::max(-dynamicsParams.turbulenceVectorChangeMax, std::min(m_turbulenceVectorChange.x, dynamicsParams.turbulenceVectorChangeMax));
-        m_turbulenceVectorChange.y = std::max(-dynamicsParams.turbulenceVectorChangeMax, std::min(m_turbulenceVectorChange.y, dynamicsParams.turbulenceVectorChangeMax));
-        m_turbulenceVectorChange.z = std::max(-dynamicsParams.turbulenceVectorChangeMax, std::min(m_turbulenceVectorChange.z, dynamicsParams.turbulenceVectorChangeMax));
-
-        m_turbulenceVector += m_turbulenceVectorChange;
-        m_turbulenceVector.normalize();
+        return MS::kSuccess;
     }
 
-    // external force
-    // gravity
-    MVector externalForce = dynamicsParams.gravity * dynamicsParams.gravityMultiply;
+    auto outputRotationFromPosition = [&](const MVector& simulatedPosition) {
+        const MVector initVec = (initialPose.endWorldTranslate - initialPose.boneWorldTranslate) * initialPose.boneInitialParentInverseMatrix;
+        const MVector targetVec = (simulatedPosition - initialPose.boneWorldTranslate) * initialPose.boneInitialParentInverseMatrix;
+        const MQuaternion quat(initVec, targetVec);
+        const MTransformationMatrix offseted_rotation = quat.asMatrix() * initialPose.roMatrix;
+        const MQuaternion offseted_quat = offseted_rotation.rotation();
+        const MEulerRotation rot = offseted_quat.asEulerRotation();
 
-    // spring force
-    const MVector springVector = (initialPose.endWorldTranslate - nextPosition);
-    const double springVectorLength = springVector.length();
-    MVector springForce;
+        outputRotateHandle.set3Double(rot.x, rot.y, rot.z);
+    };
 
-    switch (dynamicsParams.elasticForceFunction) // experimental
-    {
-        case 0: // Linear
-            springForce = (springVector * dynamicsParams.elasticity) / dynamicsParams.mass;
-            break;
-        case 1: // Quadratic
-            springForce = (springVector * ((springVectorLength + 1.0) * dynamicsParams.elasticity)) / dynamicsParams.mass;
-            break;
-        case 2: // Cubic
-            springForce = (springVector * ((springVectorLength + 1.0) * (springVectorLength + 1.0) * dynamicsParams.elasticity)) / dynamicsParams.mass;
-            break;
-        default:
-            break;
-    }
-    
-    // clamp spring force
-    const double maxSpringForce = springVectorLength / dt2;
-    if (springForce.length() > maxSpringForce)
-    {
-        springForce = springForce.normal() * maxSpringForce;
+    // same-frame re-evaluation: keep the simulation state, just refresh the output
+    if (dtTotal <= 0.0) {
+        outputRotationFromPosition(m_position);
+        CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
+
+        return MS::kSuccess;
     }
 
-    externalForce += springForce;
-    
-    // additional force
-    externalForce += (dynamicsParams.additionalForce * dynamicsParams.additionalForceScale) / dynamicsParams.mass;
-    
-    // turbulence force
-    if (dynamicsParams.enableTurbulence) {
-        externalForce += (m_turbulenceVector * dynamicsParams.turbulenceStrength) / dynamicsParams.mass;
-    }
+    // sub-steps (fixed-step catch-up, capped for stability)
+    int numSubSteps = static_cast<int>(std::ceil(dtTotal / kSubStepDt));
+    numSubSteps = std::max(1, std::min(numSubSteps, kMaxSubSteps));
+    const double subDt = dtTotal / numSubSteps;
+    const double dt2 = subDt * subDt;
 
-    // apply external force
-    nextPosition += externalForce * dt2;
-    
-    // apply stiffness
-    nextPosition += (m_position - nextPosition) * dynamicsParams.stiffness;
+    MVector nextPosition = m_position;
 
     // angle limit
     const bool enableAngleLimit = data.inputValue(s_enableAngleLimit).asBool();
@@ -1032,13 +979,13 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 
     MArrayDataHandle sphereColArrayHandle = data.inputArrayValue(s_sphereCollider);
     const unsigned int scCount = sphereColArrayHandle.elementCount();
-        
+
     MArrayDataHandle capsuleColArrayHandle = data.inputArrayValue(s_capsuleCollider);
     const unsigned int ccCount = capsuleColArrayHandle.elementCount();
 
     MArrayDataHandle capsuleColiderInputArrayHandle = data.inputArrayValue(s_capsuleColliderInput);
     const unsigned int cciCount = capsuleColiderInputArrayHandle.elementCount();
-        
+
     MArrayDataHandle iPlaneColArrayHandle = data.inputArrayValue(s_iPlaneCollider);
     const unsigned int pcCount = iPlaneColArrayHandle.elementCount();
 
@@ -1095,7 +1042,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             capsuleColData.pointB = capsuleColPositionB;
             capsuleColData.radiusA = capsuleColRadiusA;
             capsuleColData.radiusB = capsuleColRadiusB;
-            
+
             capsuleColliders[ccIdx] = capsuleColData;
         }
 
@@ -1103,13 +1050,13 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         for (unsigned int cciIdx = 0; cciIdx < cciCount; ++cciIdx) {
             CHECK_MSTATUS_AND_RETURN_IT(capsuleColiderInputArrayHandle.jumpToArrayElement(cciIdx));
             MDataHandle capsuleColliderInput = capsuleColiderInputArrayHandle.inputValue();
-            
+
             const MMatrix capsuleColMatrix = capsuleColliderInput.child(s_capsuleColliderMatrix).asMatrix();
             const MTransformationMatrix capsuleColTransfomMatrix(capsuleColMatrix);
             double capsuleColScale[3];
             CHECK_MSTATUS_AND_RETURN_IT(capsuleColTransfomMatrix.getScale(capsuleColScale, MSpace::kWorld));
             const double capsuleColHeight = capsuleColliderInput.child(s_capsuleColliderHeight).asDouble();
-            
+
             const MVector capsuleColPointA = MVector(MPoint(0, capsuleColHeight * 0.5, 0) * capsuleColMatrix);
             const MVector capsuleColPointB = MVector(MPoint(0, -capsuleColHeight * 0.5, 0) * capsuleColMatrix);
 
@@ -1148,96 +1095,187 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         }
     }
 
-    // constraints and collisions iterations
-    for (int i = 0; i < iter; ++i)
+    for (int step = 0; step < numSubSteps; ++step)
     {
+        // position offset
+        const MPoint offsetedPosition = MPoint(m_position) * m_prevOffsetMatrix.inverse() * initialPose.offsetMatrix;
+        m_position = MVector(offsetedPosition) * initialPose.offsetMatrixWeight + m_position * (1.0 - initialPose.offsetMatrixWeight);
+
+        // velocity damping (per-second exponential decay)
+        m_velocity *= std::exp(-dynamicsParams.damping * subDt);
+
+        // add velocity
+        nextPosition = m_position + (m_velocity * subDt);
+
+        // turbulence vector
+        if (dynamicsParams.enableTurbulence) {
+            if (dynamicsParams.turbulenceSeed != m_lastSeed) {
+                m_lastSeed = dynamicsParams.turbulenceSeed;
+                m_turbStep = 0;
+            }
+
+            // Init xoshiro128++ from the cumulative substep index so the
+            // sequence is deterministic and independent of the scene frame rate.
+            std::uint32_t s = static_cast<std::uint32_t>(dynamicsParams.turbulenceSeed) ^ (static_cast<std::uint32_t>(m_turbStep) * 0x9e3779b9u);
+            for (int i = 0; i < 4; ++i) {
+                s = s * 1664525u + 1013904223u;
+                m_rngState[i] = s;
+            }
+
+            // keep the per-second change magnitude at the old 30 fps level
+            const double turbScale = subDt * kRefFps;
+
+            m_turbulenceVectorChange += MVector(
+                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale) * turbScale,
+                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale) * turbScale,
+                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale) * turbScale
+            );
+
+            m_turbulenceVectorChange.x = std::max(-dynamicsParams.turbulenceVectorChangeMax, std::min(m_turbulenceVectorChange.x, dynamicsParams.turbulenceVectorChangeMax));
+            m_turbulenceVectorChange.y = std::max(-dynamicsParams.turbulenceVectorChangeMax, std::min(m_turbulenceVectorChange.y, dynamicsParams.turbulenceVectorChangeMax));
+            m_turbulenceVectorChange.z = std::max(-dynamicsParams.turbulenceVectorChangeMax, std::min(m_turbulenceVectorChange.z, dynamicsParams.turbulenceVectorChangeMax));
+
+            m_turbulenceVector += m_turbulenceVectorChange;
+            m_turbulenceVector.normalize();
+
+            ++m_turbStep;
+        }
+
+        // external force
+        // gravity
+        MVector externalForce = dynamicsParams.gravity * dynamicsParams.gravityMultiply;
+
+        // spring force
+        const MVector springVector = (initialPose.endWorldTranslate - nextPosition);
+        const double springVectorLength = springVector.length();
+        MVector springForce;
+
+        switch (dynamicsParams.elasticForceFunction) // experimental
+        {
+            case 0: // Linear
+                springForce = (springVector * dynamicsParams.elasticity) / dynamicsParams.mass;
+                break;
+            case 1: // Quadratic
+                springForce = (springVector * ((springVectorLength + 1.0) * dynamicsParams.elasticity)) / dynamicsParams.mass;
+                break;
+            case 2: // Cubic
+                springForce = (springVector * ((springVectorLength + 1.0) * (springVectorLength + 1.0) * dynamicsParams.elasticity)) / dynamicsParams.mass;
+                break;
+            default:
+                break;
+        }
+
+        // clamp spring force
+        const double maxSpringForce = springVectorLength / dt2;
+        if (springForce.length() > maxSpringForce)
+        {
+            springForce = springForce.normal() * maxSpringForce;
+        }
+
+        externalForce += springForce;
+
+        // additional force
+        externalForce += (dynamicsParams.additionalForce * dynamicsParams.additionalForceScale) / dynamicsParams.mass;
+
+        // turbulence force
+        if (dynamicsParams.enableTurbulence) {
+            externalForce += (m_turbulenceVector * dynamicsParams.turbulenceStrength) / dynamicsParams.mass;
+        }
+
+        // apply external force
+        nextPosition += externalForce * dt2;
+
+        // apply stiffness (per-second exponential approach)
+        nextPosition += (m_position - nextPosition) * (1.0 - std::exp(-dynamicsParams.stiffness * subDt));
+
+
+        // constraints and collisions iterations
+        for (int i = 0; i < iter; ++i)
+        {
+            // distance constraint
+            distanceConstraint(initialPose.boneWorldTranslate, nextPosition, initialPose.distance);
+
+            // sphere collision
+            for (const SphereColliderData& sphereCol : sphereColliders)
+            {
+                if (boneAsCapsule)
+                {
+                    solveSphereCollision(nextPosition, initialPose.boneWorldTranslate, sphereCol, initialPose.radius, initialPose.rootRadius);
+                }
+                else
+                {
+                    solveSphereCollision(nextPosition, sphereCol, initialPose.radius);
+                }
+            }
+
+            // capsule collision
+            for (const CapsuleColliderData& capsuleCol : capsuleColliders)
+            {
+                if (boneAsCapsule)
+                {
+                    solveCapsuleCollision(nextPosition, initialPose.boneWorldTranslate, capsuleCol, initialPose.radius, initialPose.rootRadius);
+                }
+                else
+                {
+                    solveCapsuleCollision(nextPosition, capsuleCol, initialPose.radius);
+                }
+            }
+
+            // infinite plane collision
+            for (const InfinitePlaneColliderData& iPlaneCol : iPlaneColliders)
+            {
+                solveInfinitePlaneCollision(nextPosition, iPlaneCol, initialPose.radius);
+            }
+
+            // mesh collision (experimental)
+            for (const MObject& meshCol : meshColliders)
+            {
+                solveMeshCollision(nextPosition, meshCol, initialPose.radius, meshColCutoff);
+            }
+
+            // ground collision
+            if (enableGroundCol)
+            {
+                solveGroundCollision(nextPosition, groundHeight, initialPose.radius);
+            };
+
+            // angle limit
+            if (enableAngleLimit)
+            {
+                angleLimit(
+                    initialPose.boneWorldTranslate,
+                    initialPose.endWorldTranslate,
+                    nextPosition,
+                    mathUtils::degToRad(angleLimitDegrees / 2.0)
+                );
+            };
+        }
+
+        // angle limit
+        if (iter == 0 && enableAngleLimit)
+        {
+            angleLimit(
+                initialPose.boneWorldTranslate,
+                initialPose.endWorldTranslate,
+                nextPosition,
+                mathUtils::degToRad(angleLimitDegrees / 2.0)
+            );
+        }
+
         // distance constraint
         distanceConstraint(initialPose.boneWorldTranslate, nextPosition, initialPose.distance);
 
-        // sphere collision
-        for (const SphereColliderData& sphereCol : sphereColliders)
-        {
-            if (boneAsCapsule)
-            {
-                solveSphereCollision(nextPosition, initialPose.boneWorldTranslate, sphereCol, initialPose.radius, initialPose.rootRadius);
-            }
-            else
-            {
-                solveSphereCollision(nextPosition, sphereCol, initialPose.radius);
-            }
-        }
-
-        // capsule collision
-        for (const CapsuleColliderData& capsuleCol : capsuleColliders)
-        {
-            if (boneAsCapsule)
-            {
-                solveCapsuleCollision(nextPosition, initialPose.boneWorldTranslate, capsuleCol, initialPose.radius, initialPose.rootRadius);
-            }
-            else
-            {
-                solveCapsuleCollision(nextPosition, capsuleCol, initialPose.radius);
-            }
-        }
-
-        // infinite plane collision
-        for (const InfinitePlaneColliderData& iPlaneCol : iPlaneColliders)
-        {
-            solveInfinitePlaneCollision(nextPosition, iPlaneCol, initialPose.radius);
-        }
-
-        // mesh collision (experimental)
-        for (const MObject& meshCol : meshColliders)
-        {
-            solveMeshCollision(nextPosition, meshCol, initialPose.radius, meshColCutoff);
-        }
-
-        // ground collision
-        if (enableGroundCol)
-        {
-            solveGroundCollision(nextPosition, groundHeight, initialPose.radius);
-        };
-
-        // angle limit
-        if (enableAngleLimit)
-        {
-            angleLimit(
-                initialPose.boneWorldTranslate, 
-                initialPose.endWorldTranslate, 
-                nextPosition, 
-                mathUtils::degToRad(angleLimitDegrees / 2.0)
-            );
-        };
+        // update velocity, position
+        m_velocity = (nextPosition - m_position) / subDt;
+        m_position = nextPosition;
     }
 
-    // angle limit
-    if (iter == 0 && enableAngleLimit)
-    {
-        angleLimit(
-            initialPose.boneWorldTranslate,
-            initialPose.endWorldTranslate,
-            nextPosition,
-            mathUtils::degToRad(angleLimitDegrees / 2.0)
-        );
-    }
-
-    // distance constraint
-    distanceConstraint(initialPose.boneWorldTranslate, nextPosition, initialPose.distance);
-    
-    // update velocity, position, offset matrix
-    m_velocity = (nextPosition - m_position) / dt;
-    m_position = nextPosition;
     m_prevOffsetMatrix = initialPose.offsetMatrix;
+    m_prevTime = time;
+    m_hasPrevTime = true;
 
     // output local euler rotation
-    const MVector initVec = (initialPose.endWorldTranslate - initialPose.boneWorldTranslate) * initialPose.boneInitialParentInverseMatrix;
-    const MVector targetVec = (nextPosition - initialPose.boneWorldTranslate) * initialPose.boneInitialParentInverseMatrix;
-    const MQuaternion quat(initVec, targetVec);
-    const MTransformationMatrix offseted_rotation = quat.asMatrix() * initialPose.roMatrix;
-    const MQuaternion offseted_quat = offseted_rotation.rotation();
-    const MEulerRotation rot = offseted_quat.asEulerRotation();
-    
-    outputRotateHandle.set3Double(rot.x, rot.y, rot.z);
+    outputRotationFromPosition(nextPosition);
     CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
 
     return MS::kSuccess;

@@ -58,7 +58,7 @@ cmds.select(bon)
 ```
 
 > [!IMPORTANT]
-> Please set "Playback speed" to **Play every frame**.
+> The simulation advances by scene time (deltaTime), not per playback frame. "Play every frame" is still recommended for a stable real-time preview. Scrubbing backwards or large time jumps will reset the simulation to the current pose. Dynamic parameters (e.g. `damping`) are expressed per second; use `timeScale` to speed up or slow down the simulation.
 
 Refer to [Quick Start](https://github.com/akasaki1211/boneDynamicsNode/wiki/Quick-Start) and [Basic Usage](https://github.com/akasaki1211/boneDynamicsNode/wiki/Basic-Usage) for details.
 

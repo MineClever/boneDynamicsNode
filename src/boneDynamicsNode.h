@@ -11,6 +11,7 @@
 #include <maya/MVector.h>
 #include <maya/MQuaternion.h>
 #include <maya/MEulerRotation.h>
+#include <maya/MTime.h>
 
 class boneDynamicsNode : public MPxNode
 {
@@ -34,7 +35,7 @@ public:
     // time
     static MObject s_time;
     static MObject s_resetTime;
-    static MObject s_fps;               // calculate deltatime 
+    static MObject s_timeScale;         // simulate time multiplier
 
     // transform
     static MObject s_offsetMatrix;      // offset current-position
@@ -148,13 +149,15 @@ private:
     
     // simulate state
     bool m_isSimulationInitialized;
+    MTime m_prevTime;                   // last evaluated scene time
+    bool m_hasPrevTime;                 // whether m_prevTime is valid
     MMatrix m_prevOffsetMatrix;
     MVector m_position;
     MVector m_velocity;
 
     // turbulence state
     int m_lastSeed;
-    int m_lastFrame;
+    int m_turbStep;                     // cumulative substep index for reproducible turbulence
     std::uint32_t m_rngState[4];
     MVector m_turbulenceVector;       // turbulence vector
     MVector m_turbulenceVectorChange; // vector that changes the turbulenceVector
