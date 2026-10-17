@@ -24,10 +24,35 @@ namespace
 {
     constexpr double kCapsuleMinThreshold = 0.1;
 
-    // deltaTime sub-stepping (fixed internal defaults, not exposed)
-    constexpr double kSubStepDt = 1.0 / 240.0;              // fixed substep duration in seconds
-    constexpr double kMaxSceneGapSec = 16.0 * kSubStepDt;   // reset only for scene-time jumps, independent of timeScale
+    // Keep scene-time seek detection independent of the integration frequency.
+    constexpr double kMaxSceneGapSec = 1.0 / 15.0;
     constexpr double kRefFps = 30.0;                        // reference fps for turbulence scaling
+
+    double integrationStepSeconds(double frameSeconds)
+    {
+        const double roundedFps = std::round(1.0 / frameSeconds);
+        if (roundedFps >= 1.0) {
+            // Prefer 240 when both rates divide evenly. Round only for choosing
+            // the frame's base step count; retain the real frame duration.
+            if (std::fmod(240.0, roundedFps) == 0.0) {
+                return frameSeconds / (240.0 / roundedFps);
+            }
+            if (std::fmod(300.0, roundedFps) == 0.0) {
+                return frameSeconds / (300.0 / roundedFps);
+            }
+        }
+        return 1.0 / 240.0;
+    }
+
+    double roundedUpStepCount(double duration, double stepSeconds)
+    {
+        const double count = duration / stepSeconds;
+        const double nearest = std::round(count);
+        // Seconds conversions can place an integer count a few ULPs above its
+        // boundary. Avoid adding an entire substep because of roundoff alone.
+        const double tolerance = 8.0 * std::numeric_limits<double>::epsilon() * std::max(1.0, std::abs(count));
+        return std::abs(count - nearest) <= tolerance ? nearest : std::ceil(count);
+    }
 
     void angleLimit(const MVector& pivot, const MVector& a, MVector& b, const double limitAngle)
     {
@@ -340,7 +365,7 @@ MObject boneDynamicsNode::s_meshColCutoff;
 
 MObject boneDynamicsNode::s_outputRotate;
 
-boneDynamicsNode::boneDynamicsNode() : m_isSimulationInitialized(false), m_hasPrevTime(false), m_lastSeed(-1), m_turbStep(0) {
+boneDynamicsNode::boneDynamicsNode() : m_isSimulationInitialized(false), m_hasPrevTime(false), m_prevFrameSeconds(0.0), m_lastSeed(-1), m_turbStep(0) {
     m_rngState[0] = 0;
     m_rngState[1] = 0;
     m_rngState[2] = 0;
@@ -890,6 +915,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     // time
     const MTime time = data.inputValue(s_time).asTime();
     const MTime resetTime = data.inputValue(s_resetTime).asTime();
+    const double frameSeconds = MTime(1.0, MTime::uiUnit()).as(MTime::kSeconds);
 
     // reset simulation state
     auto resetSimulation = [&]() {
@@ -899,6 +925,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         m_isSimulationInitialized = true;
         m_prevTime = time;
         m_hasPrevTime = true;
+        m_prevFrameSeconds = frameSeconds;
         m_turbStep = 0;
 
         if (dynamicsParams.enableTurbulence) {
@@ -921,7 +948,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     };
 
     // reset and initialization
-    if (time <= resetTime || !m_isSimulationInitialized) {
+    if (time <= resetTime || !m_isSimulationInitialized || frameSeconds != m_prevFrameSeconds) {
         resetSimulation();
         outputInitialRotation();
         CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
@@ -935,7 +962,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     const double dtTotal = sceneDt * timeScale;
 
     // Reject invalid numeric input before changing persistent simulation state.
-    const double subStepCount = std::ceil(dtTotal / kSubStepDt);
+    const double subStepCount = roundedUpStepCount(dtTotal, integrationStepSeconds(frameSeconds));
     if (!std::isfinite(timeScale) || timeScale < 0.0 || !std::isfinite(subStepCount) ||
         subStepCount >= static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
         MGlobal::displayError("boneDynamicsNode: timeScale exceeds the representable simulation range.");
@@ -973,7 +1000,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         return MS::kSuccess;
     }
 
-    // Cover the full scaled duration; never enlarge the integration step or discard time.
+    // Cover the full scaled duration, dividing real elapsed seconds evenly.
     const std::uint64_t numSubSteps = static_cast<std::uint64_t>(std::max(1.0, subStepCount));
     const double subDt = dtTotal / numSubSteps;
     const double dt2 = subDt * subDt;

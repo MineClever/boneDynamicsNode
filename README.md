@@ -60,9 +60,16 @@ cmds.select(bon)
 > [!IMPORTANT]
 > The simulation advances by scene time (deltaTime), not per playback frame. "Play every frame" is still recommended for a stable real-time preview. Scrubbing backwards or large time jumps will reset the simulation to the current pose. Dynamic parameters (e.g. `damping`) are expressed per second; use `timeScale` to speed up or slow down the simulation.
 
-`timeScale` uses integration steps no longer than 1/240 second. Values above 1
-increase the number of steps without resetting the simulation or dropping scaled
-time. Computation cost grows with the multiplier; very high values may not play
+The integration frequency is selected from the scene frame rate rounded to the
+nearest integer: use 240 Hz if divisible by that integer, otherwise 300 Hz if
+divisible, otherwise fall back to a maximum step of 1/240 second. At `timeScale=1`,
+24/25/120 fps use 10/12/2 steps per frame. Common fractional rates use the same
+base counts as their rounded rates (e.g. 23.976 fps uses 10 steps), dividing the
+**real frame duration** evenly rather than rounding simulated time. Changing the
+scene frame rate resets the simulation on its next evaluation.
+
+Values of `timeScale` above 1 increase the number of steps without resetting the
+simulation or dropping scaled time. Computation cost grows with the multiplier; very high values may not play
 in real time. A value of 0 pauses simulation and does not accumulate elapsed time.
 The existing seek policy uses **unscaled scene time**: backwards seeks and gaps
 over 1/15 second reset the state. Use Play every frame to avoid playback skips.

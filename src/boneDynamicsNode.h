@@ -151,6 +151,7 @@ private:
     bool m_isSimulationInitialized;
     MTime m_prevTime;                   // last evaluated scene time
     bool m_hasPrevTime;                 // whether m_prevTime is valid
+    double m_prevFrameSeconds;          // reset state when the scene frame rate changes
     MMatrix m_prevOffsetMatrix;
     MVector m_position;
     MVector m_velocity;

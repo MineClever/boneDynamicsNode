@@ -28,19 +28,73 @@ def make_solver(scale):
     return node, target
 
 
-def simulate(scale, frames, mode="off"):
+def simulate(scale, frames, mode="off", unit="ntsc", turbulence=False, start_frame=0):
     cmds.file(new=True, force=True)
-    cmds.currentUnit(time="ntsc")
+    cmds.currentUnit(time=unit)
     cmds.evaluationManager(mode=mode)
     node, target = make_solver(scale)
+    cmds.setAttr(node + ".enableTurbulence", turbulence)
+    if turbulence:
+        cmds.setAttr(node + ".turbulenceStrength", 50)
     samples = []
-    for frame in range(frames + 1):
+    for frame in range(start_frame, start_frame + frames + 1):
         cmds.currentTime(frame)
         samples.append(cmds.getAttr(target + ".rotate")[0])
     return samples
 
 
 class DynamicsRegression(unittest.TestCase):
+    def test_frame_rate_step_selection_preserves_real_time(self):
+        # A full frame must match N frames at 1/N speed with static inputs.
+        # Turbulence also detects an incorrect number of internal RNG updates.
+        for mode in ("off", "serial", "parallel"):
+            for unit, steps in (("film", 10), ("pal", 12), ("120fps", 2),
+                                ("ntsc", 8), ("show", 5), ("palf", 6),
+                                ("ntscf", 4), ("100fps", 3),
+                                ("23.976fps", 10), ("29.97fps", 8),
+                                ("47.952fps", 5), ("59.94fps", 4),
+                                ("75fps", 4), ("90fps", 3), ("125fps", 2)):
+                with self.subTest(mode=mode, unit=unit):
+                    actual = simulate(1, 1, mode, unit, True)[-1]
+                    expected = simulate(1.0 / steps, steps, mode, unit, True)[-1]
+                    self.assertGreater(max(abs(v) for v in actual), 1e-8)
+                    for a, b in zip(actual, expected):
+                        self.assertAlmostEqual(a, b, delta=1e-7,
+                                               msg=(mode, unit, actual, expected))
+
+    def test_changing_frame_rate_resets_state(self):
+        for mode in ("off", "serial", "parallel"):
+            cmds.file(new=True, force=True)
+            cmds.currentUnit(time="film")
+            cmds.evaluationManager(mode=mode)
+            node, target = make_solver(1)
+            for frame in range(5):
+                cmds.currentTime(frame)
+                previous = cmds.getAttr(target + ".rotate")[0]
+            self.assertGreater(abs(previous[2]), 0.001)
+            cmds.currentUnit(time="pal", updateAnimation=False)
+            # Ensure evaluation even when Maya preserves the current time value.
+            cmds.setAttr(node + ".timeScale", 1.01)
+            self.assertEqual(cmds.getAttr(target + ".rotate")[0], (0, 0, 0))
+            cmds.setAttr(node + ".timeScale", 1)
+            frame = cmds.currentTime(query=True)
+            cmds.currentTime(frame + 1)
+            actual = cmds.getAttr(target + ".rotate")[0]
+            expected = simulate(1, 1, mode, "pal")[-1]
+            for a, b in zip(actual, expected):
+                self.assertAlmostEqual(a, b, delta=1e-7)
+
+    def test_step_selection_at_large_scene_times(self):
+        for unit, steps in (("film", 10), ("pal", 12), ("120fps", 2),
+                            ("23.976fps", 10), ("29.97fps", 8)):
+            with self.subTest(unit=unit):
+                actual = simulate(1, 1, unit=unit, turbulence=True,
+                                  start_frame=10000)[-1]
+                expected = simulate(1.0 / steps, steps, unit=unit,
+                                    turbulence=True, start_frame=10000)[-1]
+                for a, b in zip(actual, expected):
+                    self.assertAlmostEqual(a, b, delta=1e-7)
+
     def test_acceleration_integrates_the_full_duration(self):
         for mode in ("off", "serial", "parallel"):
             for scale in (2, 3.5, 10, 100):
