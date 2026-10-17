@@ -26,6 +26,7 @@ MTypeId meshColliderNode::s_id(nodeIds::meshColliderNode);
 MObject meshColliderNode::s_inputMesh, meshColliderNode::s_time;
 MObject meshColliderNode::s_colorSet, meshColliderNode::s_excludeThreshold;
 MObject meshColliderNode::s_timeSamples, meshColliderNode::s_contactOffset, meshColliderNode::s_continuous;
+MObject meshColliderNode::s_rootOverlapFallback;
 MObject meshColliderNode::s_output, meshColliderNode::s_geometryBuilds;
 MObject meshColliderNode::s_sampleCount, meshColliderNode::s_topologyChanged;
 
@@ -50,6 +51,9 @@ MStatus meshColliderNode::initialize()
     s_continuous = numeric.create("continuous", "ccd", MFnNumericData::kBoolean, true);
     numeric.setKeyable(true);
 
+    s_rootOverlapFallback = numeric.create("rootOverlapFallback", "rof", MFnNumericData::kBoolean, false);
+    numeric.setKeyable(true);
+
     s_output = typed.create("outputCollider", "oc", MeshColliderData::id);
     typed.setWritable(false); typed.setStorable(false);
     s_geometryBuilds = numeric.create("geometryBuilds", "gb", MFnNumericData::kInt, 0);
@@ -59,7 +63,7 @@ MStatus meshColliderNode::initialize()
     s_topologyChanged = numeric.create("topologyChanged", "tc", MFnNumericData::kBoolean, false);
     numeric.setWritable(false); numeric.setStorable(false);
     const MObject inputs[] = {s_inputMesh, s_time, s_colorSet, s_excludeThreshold,
-                             s_timeSamples, s_contactOffset, s_continuous};
+                             s_timeSamples, s_contactOffset, s_continuous, s_rootOverlapFallback};
     const MObject outputs[] = {s_output, s_geometryBuilds, s_sampleCount, s_topologyChanged};
     for (const auto& input : inputs) CHECK_MSTATUS_AND_RETURN_IT(addAttribute(input));
     for (const auto& output : outputs) CHECK_MSTATUS_AND_RETURN_IT(addAttribute(output));
@@ -76,6 +80,18 @@ void meshColliderNode::getCacheSetup(const MEvaluationNode&, MNodeCacheDisabling
     info.setReason("Mesh collider carries native query caches and sampled motion history.");
 }
 #endif
+
+MStatus meshColliderNode::connectionMade(const MPlug& plug, const MPlug& other, bool asSource)
+{
+    if (plug.attribute() == s_inputMesh) ++m_policyRevision;
+    return MPxNode::connectionMade(plug, other, asSource);
+}
+
+MStatus meshColliderNode::connectionBroken(const MPlug& plug, const MPlug& other, bool asSource)
+{
+    if (plug.attribute() == s_inputMesh) ++m_policyRevision;
+    return MPxNode::connectionBroken(plug, other, asSource);
+}
 
 MStatus meshColliderNode::compute(const MPlug& plug, MDataBlock& data)
 {
@@ -94,6 +110,8 @@ MStatus meshColliderNode::compute(const MPlug& plug, MDataBlock& data)
     auto timeline = std::make_shared<meshCollision::Timeline>();
     timeline->continuous = data.inputValue(s_continuous).asBool();
     timeline->contactOffset = contactOffset;
+    timeline->rootOverlapFallback = data.inputValue(s_rootOverlapFallback).asBool();
+    timeline->provider = MObjectHandle(thisMObject());
 
     auto capture = [&](const MObject& mesh, std::shared_ptr<const meshCollision::Snapshot>& value) -> MStatus {
         bool built = false;
@@ -105,6 +123,11 @@ MStatus meshColliderNode::compute(const MPlug& plug, MDataBlock& data)
     CHECK_MSTATUS_AND_RETURN_IT(capture(data.inputValue(s_inputMesh).asMeshTransformed(), current));
     const MPlug input(thisMObject(), s_inputMesh);
     const MPlug source = input.source(&status);
+    const bool policyChanged = !m_published || source != m_previousSource ||
+        samples != m_previousSamples || colorSet != m_policyColorSet || threshold != m_policyThreshold ||
+        timeline->continuous != m_published->continuous || contactOffset != m_published->contactOffset ||
+        timeline->rootOverlapFallback != m_published->rootOverlapFallback;
+    timeline->policyRevision = m_policyRevision + (policyChanged ? 1 : 0);
     const bool advancing = normalContext && m_hasPrevious && source == m_previousSource &&
                            now > m_previousSeconds && now - m_previousSeconds <= 1.0 / 15.0;
     int sampleCount = 1;
@@ -146,6 +169,8 @@ MStatus meshColliderNode::compute(const MPlug& plug, MDataBlock& data)
         timeline->segments.push_back(meshCollision::segment(now, now, current, current, timeline->topologyChanged));
     }
     if (normalContext) {
+        m_policyRevision = timeline->policyRevision;
+        m_policyColorSet = colorSet; m_policyThreshold = threshold;
         m_previous = current; m_previousSeconds = now; m_hasPrevious = true;
         m_previousSource = source;
         m_published = timeline;

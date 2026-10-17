@@ -13,6 +13,7 @@
 - Simple integration with standard Maya joints
 - Multiple collision types: sphere, capsule, infinite plane, ground, and mesh
 - Shared deforming mesh colliders with sampled motion, sphere/capsule CCD and vertex-color face exclusion
+- Optional [endpoint fallback on fixed-root mesh overlap](docs/mesh_colliders.md#temporary-endpoint-fallback-for-fixed-roots), default off; the bone middle loses collision protection while active
 - Dedicated collider nodes and visualizer node
 - Python helper package for scripted setup
 - Angle limits

@@ -22,13 +22,17 @@ def _mesh_source(mesh):
 @utils.with_traceback
 @utils.undo_chunk
 def create_mesh_collider(mesh, exclude_color_set='bdnCollisionExclude', time_samples=4,
-                         contact_offset=0.001, continuous=True, reuse=True, name=None):
+                         contact_offset=0.001, continuous=True, reuse=True, name=None,
+                         root_overlap_fallback=False):
     """Return a shared DG collider for an independently driven Maya mesh.
 
     time_samples specifies linear motion intervals per evaluated frame.
     Faces whose ALL corner colors have red >= excludeThreshold are excluded.
     Missing colors retain collision; contact_offset uses the scene length unit.
     A skin driven by this same dynamics chain would form a dependency cycle.
+    root_overlap_fallback temporarily uses endpoint collision for a capsule whose
+    fixed root overlaps this mesh; the middle loses protection until clearance
+    recovers. Defaults to False. The original boneAsCapsule setting is preserved.
     """
     if not utils.load_plugin():
         raise RuntimeError("Failed to load boneDynamicsNode plugin.")
@@ -39,7 +43,8 @@ def create_mesh_collider(mesh, exclude_color_set='bdnCollisionExclude', time_sam
             if (cmds.getAttr(existing + '.excludeColorSet') == exclude_color_set and
                     cmds.getAttr(existing + '.timeSamples') == time_samples and
                     abs(cmds.getAttr(existing + '.contactOffset') - contact_offset) < 1e-12 and
-                    cmds.getAttr(existing + '.continuous') == continuous):
+                    cmds.getAttr(existing + '.continuous') == continuous and
+                    cmds.getAttr(existing + '.rootOverlapFallback') == root_overlap_fallback):
                 return existing
     options = {'name': name} if name else {}
     node = cmds.createNode('meshColliderNode', **options)
@@ -47,6 +52,7 @@ def create_mesh_collider(mesh, exclude_color_set='bdnCollisionExclude', time_sam
     cmds.setAttr(node + '.timeSamples', time_samples)
     cmds.setAttr(node + '.contactOffset', contact_offset)
     cmds.setAttr(node + '.continuous', continuous)
+    cmds.setAttr(node + '.rootOverlapFallback', root_overlap_fallback)
     cmds.connectAttr(source, node + '.inputMesh')
     cmds.connectAttr('time1.outTime', node + '.time')
     return node

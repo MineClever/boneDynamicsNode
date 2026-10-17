@@ -21,6 +21,7 @@ collider = bdn.create_mesh_collider(
     time_samples=4,
     contact_offset=0.001,
     continuous=True,
+    root_overlap_fallback=False,  # optional fixed-root conflict workaround
 )
 bdn.connect_colliders('boneDynamicsNode2', [collider])
 bdn.connect_colliders('boneDynamicsNode3', [collider])
@@ -39,6 +40,54 @@ the entire segment swept by linearly varying `rootRadius` and `radius`. Contact
 response preserves the bone length. Surface contacts take precedence over angle
 limits when both constraints cannot be satisfied simultaneously. `iterations=0`
 disables collision processing, as with the original solver.
+
+## Temporary endpoint fallback for fixed roots
+
+`meshColliderNode.rootOverlapFallback` defaults to **False** (including old
+scenes). Enable it in the AE with **Endpoint Fallback on Root Overlap**, or use
+`bdn.create_mesh_collider(mesh, root_overlap_fallback=True)`. The new Python
+argument is appended after `name`; positional calls retain their meaning, and
+provider reuse includes this setting.
+
+When `boneAsCapsule=True`, a fixed root sphere overlapping this mesh's valid
+surface selects endpoint collision for this bone/provider/substep before any
+capsule projection. It does not change `boneAsCapsule`, animate a mode switch,
+or affect other providers or analytic colliders. **During fallback the bone's
+middle loses collision protection.** The root continues following animation.
+The endpoint still uses its radius plus contactOffset, existing CCD and moving
+surface response, fixed-root bone length, and multi-mesh final checks. Genuine
+endpoint infeasibility, remaining penetration and CCD failures still report
+`meshCollisionUnresolved`.
+
+The root query uses the same masked, nondegenerate world-space triangles as the
+solver, never a closed-volume inside test. It sweeps the root against all mesh
+sample intervals even when endpoint `continuous=False`; mesh sampling itself
+still follows `continuous/timeSamples`. Unobserved nonlinear motion cannot be
+reconstructed when sampling is disabled. Newly connected providers with only a
+current snapshot use that surface immediately; previous surface motion is unknown.
+
+Let R = rootRadius + contactOffset and S = max(R, world bone length). Enter when
+the swept root is within R - S*1e-7 (subject to the existing CCD numeric tolerance).
+Once active, require the **entire substep** to clear
+R + max(16*S*1e-7, 0.05*R) before restoring capsule mode. These distances scale
+with scene geometry; no frame count or fixed centimeter hysteresis is used.
+The effective mode is selected once per substep and reused by every `solve` and
+`penetrating` pass. A single evaluation can contain both fallback and recovered
+substeps.
+
+Hysteresis belongs to each solver, keyed by live provider identity and policy
+revision. Reset/backward/gap/FPS/simulationScale changes clear it; radius changes,
+provider policy/source edits, topology loss and disconnection/reconnection
+invalidate affected history. `boneAsCapsule=False` and disabled simulation clear
+the relevant state. Non-normal DG context queries use temporary simulation and
+fallback state and restore normal playback state on return. Immutable shared
+timelines are never mutated by consumers, and policy changes retain geometry caches.
+
+Read-only `boneDynamicsNode.meshRootFallbackActive` reports whether any provider
+actually used fallback during **this evaluation**. It is False on reset, disabled
+processing, or a same-time refresh with no simulation steps; cached reads retain
+the diagnostic associated with the last computed output. It is not a mode input
+and does not suppress real failures. See the [validation record](mesh_root_fallback_done.md).
 
 ## Motion and deformation
 
@@ -130,6 +179,7 @@ not a self-collision solver.
 ```powershell
 & 'C:/Program Files/Autodesk/Maya2022/bin/mayapy.exe' tests/mesh_collider_regression.py "$PWD/build/win64_2022/Release/boneDynamicsNode.mll"
 & 'C:/Program Files/Autodesk/Maya2022/bin/mayapy.exe' tests/maya_regression.py "$PWD/build/win64_2022/Release/boneDynamicsNode.mll"
+& 'C:/Program Files/Autodesk/Maya2022/bin/mayapy.exe' tests/mesh_root_fallback_regression.py "$PWD/build/win64_2022/Release/boneDynamicsNode.mll"
 & 'C:/Program Files/Autodesk/Maya2022/bin/mayapy.exe' tests/mesh_collider_benchmark.py "$PWD/build/win64_2022/Release/boneDynamicsNode.mll"
 ```
 
@@ -145,8 +195,8 @@ Parallel evaluation, five capsules in each scene):
 These are smoke measurements on the development machine, not performance promises.
 Deforming surfaces with many bones or high sampling rates need scene-specific profiling.
 
-Validation on this branch: 20 mesh-collider tests and 12 existing regressions pass
-in Maya 2022. Release builds succeed for Maya 2019 and 2022. The locally installed
+Validation on this branch: 19 fallback tests, 20 mesh-collider tests and 12 existing
+regressions pass in Maya 2022. Release builds succeed for Maya 2019 and 2022. The locally installed
 Maya 2019 exits during `maya.standalone.initialize()` before any plugin is loaded;
 its runtime could not be validated in this environment. Interactive viewport/AE
 behavior still needs checking in an interactive Maya session.

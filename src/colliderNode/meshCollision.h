@@ -3,6 +3,7 @@
 #include <maya/MMatrix.h>
 #include <maya/MMeshIntersector.h>
 #include <maya/MObject.h>
+#include <maya/MObjectHandle.h>
 #include <maya/MString.h>
 #include <maya/MVector.h>
 #include <array>
@@ -64,6 +65,9 @@ namespace meshCollision
         double contactOffset = 0.001; // world centimeters
         bool continuous = true;
         bool topologyChanged = false;
+        bool rootOverlapFallback = false;
+        MObjectHandle provider;
+        std::uint64_t policyRevision = 0;
     };
 
     // Called only while the mesh provider is serialized, never by query workers.
@@ -87,4 +91,7 @@ namespace meshCollision
                  double endSeconds, MVector& tip);
     bool penetrating(const Timeline& collider, const Sweep& motion, double seconds,
                      const MVector& tip);
+    // Swept root-surface proximity, independent of endpoint CCD policy.
+    bool rootOverlaps(const Timeline& collider, const Sweep& motion, double beginSeconds,
+                      double endSeconds, double padding);
 }

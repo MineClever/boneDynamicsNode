@@ -359,7 +359,11 @@ Result solve(const Timeline& collider, const Sweep& motion, double begin, double
     Result result;
     const double length = (motion.tip1 - motion.root1).length();
     for (const auto& interval : collider.segments) {
-        const double start = std::max(begin, interval.begin), finish = std::min(end, interval.end);
+        // A newly connected fallback provider has only the current snapshot.
+        // Resolve against that surface immediately; no prior mesh motion is known.
+        const bool instantFallback = collider.rootOverlapFallback && !motion.capsule && interval.begin == interval.end;
+        const double start = instantFallback ? begin : std::max(begin, interval.begin);
+        const double finish = instantFallback ? end : std::min(end, interval.end);
         if (finish < start || (finish == start && end > begin)) continue;
         const double intervalDuration = interval.end - interval.begin;
         const double ta = intervalDuration > 0 ? clamp((start - interval.begin) / intervalDuration) : 1;
@@ -412,6 +416,42 @@ Result solve(const Timeline& collider, const Sweep& motion, double begin, double
         }
     }
     return result;
+}
+
+bool rootOverlaps(const Timeline& collider, const Sweep& motion, double begin, double end, double padding)
+{
+    const double radius = std::max(0.0, motion.rootRadius + collider.contactOffset + padding);
+    for (const auto& interval : collider.segments) {
+        const bool instant = interval.begin == interval.end;
+        const double start = instant ? begin : std::max(begin, interval.begin);
+        const double finish = instant ? end : std::min(end, interval.end);
+        if (finish < start || (finish == start && end > begin)) continue;
+        const double duration = interval.end - interval.begin;
+        const double ta = duration > 0 ? clamp((start - interval.begin) / duration) : 1;
+        const double tb = duration > 0 ? clamp((finish - interval.begin) / duration) : 1;
+        const double fa = end > begin ? clamp((start - begin) / (end - begin)) : 1;
+        const double fb = end > begin ? clamp((finish - begin) / (end - begin)) : 1;
+        Sweep root;
+        root.tip0 = root.root0 = mix(motion.root0, motion.root1, fa);
+        root.tip1 = root.root1 = mix(motion.root0, motion.root1, fb);
+        root.tipRadius = root.rootRadius = radius;
+        if (interval.a == interval.b && root.tip0 == root.tip1) {
+            MVector q, normal; unsigned int index;
+            if (interval.b->closest(root.tip1, q, normal, index) && (root.tip1 - q).length() < radius)
+                return true;
+            continue;
+        }
+        Bounds bounds;
+        bounds.include(root.tip0); bounds.include(root.tip1); bounds.expand(radius);
+        std::vector<unsigned int> candidates;
+        interval.tree->query(bounds, candidates);
+        for (auto index : candidates) {
+            const Hit hit = sweepTriangle(root, triangleAt(interval, index, ta),
+                                           triangleAt(interval, index, tb), 0, true);
+            if (hit.hit) return true; // A limited sweep conservatively keeps fallback.
+        }
+    }
+    return false;
 }
 
 bool penetrating(const Timeline& collider, const Sweep& motion, double seconds, const MVector& tip)

@@ -28,6 +28,8 @@ public:
 
     static MStatus initialize();
     MStatus compute(const MPlug& plug, MDataBlock& data) override;
+    MStatus connectionMade(const MPlug&, const MPlug&, bool) override;
+    MStatus connectionBroken(const MPlug&, const MPlug&, bool) override;
 
     static MTypeId s_id;
 
@@ -115,6 +117,7 @@ public:
     static MObject s_meshColCutoff;     // max distance for mesh collision detection
     static MObject s_meshColliderData;  // shared sampled MeshColliderData connections
     static MObject s_meshCollisionUnresolved;
+    static MObject s_meshRootFallbackActive;
     
     // output
     static MObject s_outputRotate;       // output euler rotation
@@ -162,6 +165,13 @@ private:
     MVector m_velocity;
     MVector m_prevMeshRoot, m_prevMeshRestEnd;
     std::vector<std::shared_ptr<const meshCollision::Snapshot>> m_legacyMeshCache;
+    struct RootFallbackState {
+        MObjectHandle provider;
+        std::uint64_t revision = 0;
+        double rootRadius = -1, tipRadius = -1;
+        bool active = false;
+    };
+    std::vector<RootFallbackState> m_rootFallbackStates;
 
     // turbulence state
     int m_lastSeed;

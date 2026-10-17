@@ -24,10 +24,13 @@ public:
     static MTypeId s_id;
     static MObject s_inputMesh, s_time, s_colorSet, s_excludeThreshold;
     static MObject s_timeSamples, s_contactOffset, s_continuous;
+    static MObject s_rootOverlapFallback;
     static MObject s_output, s_geometryBuilds, s_sampleCount, s_topologyChanged;
     static void* creator();
     static MStatus initialize();
     MStatus compute(const MPlug& plug, MDataBlock& data) override;
+    MStatus connectionMade(const MPlug&, const MPlug&, bool) override;
+    MStatus connectionBroken(const MPlug&, const MPlug&, bool) override;
     SchedulingType schedulingType() const override { return kGloballySerial; }
 #if MAYA_API_VERSION >= 20220000
     void getCacheSetup(const MEvaluationNode&, MNodeCacheDisablingInfo&,
@@ -42,4 +45,7 @@ private:
     std::shared_ptr<const meshCollision::Timeline> m_published;
     int m_previousSamples = 0;
     int m_builds = 0;
+    std::uint64_t m_policyRevision = 0;
+    MString m_policyColorSet;
+    double m_policyThreshold = -1;
 };

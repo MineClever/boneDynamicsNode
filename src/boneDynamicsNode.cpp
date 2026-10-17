@@ -20,6 +20,7 @@
 #include <algorithm> // std::max, std::min
 #include <cmath>     // std::exp, std::ceil
 #include <vector>    // std::vector
+#include <functional>
 
 namespace
 {
@@ -372,6 +373,7 @@ MObject boneDynamicsNode::s_meshCollider;
 MObject boneDynamicsNode::s_meshColCutoff;
 MObject boneDynamicsNode::s_meshColliderData;
 MObject boneDynamicsNode::s_meshCollisionUnresolved;
+MObject boneDynamicsNode::s_meshRootFallbackActive;
 
 MObject boneDynamicsNode::s_outputRotate;
 
@@ -701,6 +703,10 @@ MStatus boneDynamicsNode::initialize()
     nAttr.setWritable(false);
     nAttr.setStorable(false);
 
+    s_meshRootFallbackActive = nAttr.create("meshRootFallbackActive", "mrfa", MFnNumericData::kBoolean, false);
+    nAttr.setWritable(false);
+    nAttr.setStorable(false);
+
     // output attributes
     x = uAttr.create("outputRotateX", "outrx", MFnUnitAttribute::kAngle, 0.0);
     y = uAttr.create("outputRotateY", "outry", MFnUnitAttribute::kAngle, 0.0);
@@ -769,6 +775,7 @@ MStatus boneDynamicsNode::initialize()
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_meshColCutoff));
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_meshColliderData));
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_meshCollisionUnresolved));
+    CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_meshRootFallbackActive));
 
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_outputRotate));
     
@@ -846,6 +853,7 @@ MStatus boneDynamicsNode::initialize()
     {
         CHECK_MSTATUS_AND_RETURN_IT(attributeAffects(input, s_outputRotate));
         CHECK_MSTATUS_AND_RETURN_IT(attributeAffects(input, s_meshCollisionUnresolved));
+        CHECK_MSTATUS_AND_RETURN_IT(attributeAffects(input, s_meshRootFallbackActive));
     }
 
     return MS::kSuccess;
@@ -912,11 +920,47 @@ boneDynamicsNode::DynamicsParameters boneDynamicsNode::getDynamicsParameters(MDa
     return params;
 }
 
+MStatus boneDynamicsNode::connectionMade(const MPlug& plug, const MPlug& other, bool asSource)
+{
+    if (plug.attribute() == s_meshColliderData) m_rootFallbackStates.clear();
+    return MPxNode::connectionMade(plug, other, asSource);
+}
+
+MStatus boneDynamicsNode::connectionBroken(const MPlug& plug, const MPlug& other, bool asSource)
+{
+    if (plug.attribute() == s_meshColliderData) m_rootFallbackStates.clear();
+    return MPxNode::connectionBroken(plug, other, asSource);
+}
+
 MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 {
+    // Context queries must not consume the normal playback trajectory or its
+    // hysteresis. Restore even on validation errors/early reset returns.
+    struct ContextRestore {
+        std::function<void()> restore;
+        ~ContextRestore() { if (restore) restore(); }
+    } contextRestore;
+    if (!data.context().isNormal()) {
+        contextRestore.restore = [this, initialized = m_isSimulationInitialized,
+            previousTime = m_prevTime, hasTime = m_hasPrevTime, frame = m_prevFrameSeconds,
+            scale = m_prevSimulationScale, offset = m_prevOffsetMatrix, position = m_position,
+            velocity = m_velocity, root = m_prevMeshRoot, end = m_prevMeshRestEnd,
+            seed = m_lastSeed, step = m_turbStep,
+            rng = std::array<std::uint32_t, 4>{{m_rngState[0], m_rngState[1], m_rngState[2], m_rngState[3]}},
+            turbulence = m_turbulenceVector, change = m_turbulenceVectorChange,
+            fallback = m_rootFallbackStates]() {
+            m_isSimulationInitialized = initialized; m_prevTime = previousTime; m_hasPrevTime = hasTime;
+            m_prevFrameSeconds = frame; m_prevSimulationScale = scale; m_prevOffsetMatrix = offset;
+            m_position = position; m_velocity = velocity; m_prevMeshRoot = root; m_prevMeshRestEnd = end;
+            m_lastSeed = seed; m_turbStep = step;
+            std::copy(rng.begin(), rng.end(), m_rngState);
+            m_turbulenceVector = turbulence; m_turbulenceVectorChange = change;
+            m_rootFallbackStates = fallback;
+        };
+    }
     const MPlug computePlug = plug.isChild() ? plug.parent() : plug;
     
-    if (computePlug != s_outputRotate && computePlug != s_meshCollisionUnresolved)
+    if (computePlug != s_outputRotate && computePlug != s_meshCollisionUnresolved && computePlug != s_meshRootFallbackActive)
     {
         return MS::kUnknownParameter;
     }
@@ -924,8 +968,13 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     // output data handles
     MDataHandle outputRotateHandle = data.outputValue(s_outputRotate);
     bool meshCollisionUnresolved = false;
+    bool meshRootFallbackActive = false;
+    if (!data.context().isNormal()) m_rootFallbackStates.clear();
     auto cleanOutputs = [&]() -> MStatus {
         data.outputValue(s_meshCollisionUnresolved).setBool(meshCollisionUnresolved);
+        data.outputValue(s_meshRootFallbackActive).setBool(meshRootFallbackActive);
+        if (!data.context().isNormal()) m_rootFallbackStates.clear();
+        CHECK_MSTATUS_AND_RETURN_IT(data.setClean(s_meshRootFallbackActive));
         CHECK_MSTATUS_AND_RETURN_IT(data.setClean(s_outputRotate));
         return data.setClean(s_meshCollisionUnresolved);
     };
@@ -934,6 +983,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     const bool enable = data.inputValue(s_enable).asBool();
     if (!enable)
     {
+        m_rootFallbackStates.clear();
         outputRotateHandle.set3Double(0.0, 0.0, 0.0);
         CHECK_MSTATUS_AND_RETURN_IT(cleanOutputs());
 
@@ -978,8 +1028,26 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         }
     }
 
+    // Retain hysteresis only for live, currently connected providers and policies.
+    std::vector<RootFallbackState> currentStates;
+    for (const auto& collider : sampledMeshes) {
+        RootFallbackState state;
+        for (const auto& previous : m_rootFallbackStates)
+            if (previous.provider.isValid() && previous.provider == collider->provider &&
+                previous.revision == collider->policyRevision && !collider->topologyChanged &&
+                previous.rootRadius == worldPose.rootRadius && previous.tipRadius == worldPose.radius)
+                state = previous;
+        state.provider = collider->provider;
+        state.revision = collider->policyRevision;
+        state.rootRadius = worldPose.rootRadius; state.tipRadius = worldPose.radius;
+        if (!collider->rootOverlapFallback || !data.inputValue(s_boneAsCapsule).asBool()) state.active = false;
+        currentStates.push_back(state);
+    }
+    m_rootFallbackStates.swap(currentStates);
+
     // reset simulation state
     auto resetSimulation = [&]() {
+        for (auto& state : m_rootFallbackStates) state.active = false;
         m_prevOffsetMatrix = initialPose.offsetMatrix;
         m_position = initialPose.endWorldTranslate;
         m_velocity = MVector();
@@ -1391,27 +1459,46 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 
         // Mesh contacts come last and project onto the bone-length sphere,
         // preventing the length constraint from undoing surface separation.
+        meshCollision::Sweep sweep;
+        sweep.root0 = meshRoot0 / simulationScale;
+        sweep.tip0 = meshTip0 / simulationScale;
+        sweep.root1 = stepPose.boneWorldTranslate / simulationScale;
+        sweep.tip1 = nextPosition / simulationScale;
+        sweep.rootRadius = stepPose.rootRadius / simulationScale;
+        sweep.tipRadius = stepPose.radius / simulationScale;
+        const double meshBegin = m_prevTime.as(MTime::kSeconds) + sceneDt * alpha0;
+        const double meshEnd = m_prevTime.as(MTime::kSeconds) + sceneDt * alpha1;
+        std::vector<bool> capsuleModes(sampledMeshes.size(), boneAsCapsule);
+        // Select once, before any mesh can project the tip. Every pass and final
+        // check uses this exact per-provider mode, independent of consumer order.
+        for (std::size_t i = 0; i < sampledMeshes.size(); ++i) {
+            const auto& collider = *sampledMeshes[i];
+            auto& state = m_rootFallbackStates[i];
+            if (boneAsCapsule && collider.rootOverlapFallback && iter > 0) {
+                const double scale = std::max(sweep.rootRadius + collider.contactOffset,
+                                              (sweep.tip1 - sweep.root1).length());
+                const double tolerance = scale * 1e-7;
+                const double padding = state.active ?
+                    std::max(16 * tolerance, .05 * (sweep.rootRadius + collider.contactOffset)) : -tolerance;
+                state.active = meshCollision::rootOverlaps(collider, sweep, meshBegin, meshEnd, padding);
+                capsuleModes[i] = !state.active;
+                meshRootFallbackActive |= state.active;
+            }
+        }
         for (int pass = 0; pass < iter && !sampledMeshes.empty(); ++pass) {
-            meshCollision::Sweep sweep;
-            sweep.root0 = meshRoot0 / simulationScale;
-            sweep.tip0 = meshTip0 / simulationScale;
-            sweep.root1 = stepPose.boneWorldTranslate / simulationScale;
-            sweep.rootRadius = stepPose.rootRadius / simulationScale;
-            sweep.tipRadius = stepPose.radius / simulationScale;
-            sweep.capsule = boneAsCapsule;
-            for (const auto& collider : sampledMeshes) {
+            for (std::size_t i = 0; i < sampledMeshes.size(); ++i) {
                 MVector worldTip = nextPosition / simulationScale;
                 sweep.tip1 = worldTip;
-                const auto contact = meshCollision::solve(*collider, sweep,
-                    m_prevTime.as(MTime::kSeconds) + sceneDt * alpha0,
-                    m_prevTime.as(MTime::kSeconds) + sceneDt * alpha1, worldTip);
+                sweep.capsule = capsuleModes[i];
+                const auto contact = meshCollision::solve(*sampledMeshes[i], sweep, meshBegin, meshEnd, worldTip);
                 meshCollisionUnresolved |= contact.unresolved;
                 nextPosition = worldTip * simulationScale;
             }
             bool penetrating = false;
-            for (const auto& collider : sampledMeshes)
-                penetrating |= meshCollision::penetrating(*collider, sweep,
-                    m_prevTime.as(MTime::kSeconds) + sceneDt * alpha1, nextPosition / simulationScale);
+            for (std::size_t i = 0; i < sampledMeshes.size(); ++i) {
+                sweep.capsule = capsuleModes[i];
+                penetrating |= meshCollision::penetrating(*sampledMeshes[i], sweep, meshEnd, nextPosition / simulationScale);
+            }
             if (!penetrating) break;
             if (pass == iter - 1) meshCollisionUnresolved = true;
         }

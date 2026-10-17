@@ -7,6 +7,9 @@ global proc AEmeshColliderNodeTemplate(string $nodeName)
             editorTemplate -label "Continuous Collision Detection" -addControl "continuous";
             editorTemplate -label "Motion Time Samples" -addControl "timeSamples";
             editorTemplate -label "Contact Offset" -addControl "contactOffset";
+            editorTemplate -label "Endpoint Fallback on Root Overlap"
+                -annotation "If the fixed root sphere overlaps this mesh, temporarily collide only the endpoint. The root follows animation; the middle may cross the mesh. Capsule detection resumes after sufficient clearance."
+                -addControl "rootOverlapFallback";
         editorTemplate -endLayout;
         editorTemplate -beginLayout "Excluded Faces" -collapse false;
             editorTemplate -label "Exclusion Color Set" -addControl "excludeColorSet";

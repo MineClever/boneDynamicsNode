@@ -2,6 +2,9 @@
 
 Branch: `feat/mesh-collider-ccd`, based on `feat/simulation-time`.
 
+Fixed-root overlap extension: [task plan](mesh_root_fallback_plan.md) and
+[execution/validation record](mesh_root_fallback_done.md).
+
 ## Required behavior
 
 - A reusable `meshColliderNode` accepts evaluated Maya world-space mesh data.

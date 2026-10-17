@@ -12,7 +12,7 @@ boneDynamicsNode 是一个 Autodesk Maya 的 C++ 插件,对关节链(bone–end 
 
 ## 构建(无测试框架)
 
-运行 `tests/maya_regression.py` 和 `tests/mesh_collider_regression.py`，参数为重编译 `.mll` 的绝对路径，使用 Maya 2022 的 mayapy。性能冒烟检查见 `tests/mesh_collider_benchmark.py`。视口仍需在交互式 Maya 中验证。
+运行 `tests/maya_regression.py` 和 `tests/mesh_collider_regression.py`，参数为重编译 `.mll` 的绝对路径，使用 Maya 2022 的 mayapy。根部降级回归见 `tests/mesh_root_fallback_regression.py`，真实 ABC 验收见 `tests/mesh_root_fallback_abc.py`。性能冒烟检查见 `tests/mesh_collider_benchmark.py`。视口仍需在交互式 Maya 中验证。
 
 ### Windows 全版本构建
 
