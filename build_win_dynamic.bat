@@ -435,6 +435,29 @@ if errorlevel 1 exit /b 1
 cmake --build "%DIRNAME%" --config "%BUILD_CONFIGURATION%"
 if errorlevel 1 exit /b 1
 
+:: Copy only the selected configuration after a successful build.
+set "BUILT_PLUGIN=%DIRNAME%\%BUILD_CONFIGURATION%\boneDynamicsNode.mll"
+set "PLUGIN_DIR=plug-ins\%MAYA_VERSION%"
+if not exist "%BUILT_PLUGIN%" (
+    echo [ERROR] Built plugin was not found: %BUILT_PLUGIN%
+    exit /b 1
+)
+
+if not exist "%PLUGIN_DIR%\" (
+    mkdir "%PLUGIN_DIR%"
+    if errorlevel 1 (
+        echo [ERROR] Failed to create plugin directory: %PLUGIN_DIR%
+        exit /b 1
+    )
+)
+
+copy /y "%BUILT_PLUGIN%" "%PLUGIN_DIR%\boneDynamicsNode.mll" >nul
+if errorlevel 1 (
+    echo [ERROR] Failed to copy plugin to: %PLUGIN_DIR%\boneDynamicsNode.mll
+    exit /b 1
+)
+echo [OK] Maya %MAYA_VERSION% %BUILD_CONFIGURATION% plugin copied to: %PLUGIN_DIR%\boneDynamicsNode.mll
+
 exit /b 0
 
 
