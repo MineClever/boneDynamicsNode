@@ -37,6 +37,8 @@ def create_dynamics_node(
         additional_force_init_vec: Initial vector that controlled by additional_force_node.
         set_name: Object set that store the created dynamics node.
         **kwargs: Attribute values to set on the created boneDynamicsNode.
+            For example, simulationScale=0.01 computes geometry at 1/100 size
+            while keeping force parameter values in simulation space.
 
     Returns:
         The created boneDynamicsNode name.

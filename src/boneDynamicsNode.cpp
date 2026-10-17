@@ -28,6 +28,16 @@ namespace
     constexpr double kMaxSceneGapSec = 1.0 / 15.0;
     constexpr double kRefFps = 30.0;                        // reference fps for turbulence scaling
 
+    MMatrix scaleMatrixTranslation(MMatrix matrix, double scale)
+    {
+        // Conjugate an affine transform into uniformly scaled coordinates:
+        // rotation, shear and dimensionless transform scales stay unchanged.
+        for (unsigned int axis = 0; axis < 3; ++axis) {
+            matrix[3][axis] *= scale;
+        }
+        return matrix;
+    }
+
     double integrationStepSeconds(double frameSeconds)
     {
         const double roundedFps = std::round(1.0 / frameSeconds);
@@ -261,16 +271,19 @@ namespace
         fnMesh.getClosestPointAndNormal(point, closestPoint, closestNormal, MSpace::kWorld);
     }
 
-    void solveMeshCollision(MVector& position, const MObject& meshCol, double radius, double cutoff)
+    void solveMeshCollision(MVector& position, const MObject& meshCol, double radius, double cutoff, double simulationScale)
     {
         // Get the closest point and closest normal on a mesh
         MPoint closestPoint;
         MVector closestNormal;
-        getClosestPoint(meshCol, MPoint(position), closestPoint, closestNormal);
+        // The Maya mesh remains in world space; only query/results cross the
+        // simulation boundary. Normals are unchanged by a positive uniform scale.
+        getClosestPoint(meshCol, MPoint(position / simulationScale), closestPoint, closestNormal);
+        const MVector simulationClosestPoint = MVector(closestPoint) * simulationScale;
         closestNormal = closestNormal.normal();
 
         // Get the vector from the closest point to the current point
-        const MVector contactVec = position - MVector(closestPoint);
+        const MVector contactVec = position - simulationClosestPoint;
 
         // Get the distance to the surface
         const double distanceContactPoint = closestNormal * contactVec;
@@ -279,7 +292,7 @@ namespace
         if (distanceContactPoint - radius < 0.0)
         {
             // If it is completely penetrated, it uses the closest normal to push out, if it is only in contact, it uses the contactVec to push out.
-            MVector pushOutPos = MVector(closestPoint) + (distanceContactPoint < 0 ? closestNormal : contactVec.normal()) * radius;
+            MVector pushOutPos = simulationClosestPoint + (distanceContactPoint < 0 ? closestNormal : contactVec.normal()) * radius;
             
             // If the position after push out is within meshColCutoff from the current position, it will be pushed out.
             if ((position - pushOutPos).length() < cutoff)
@@ -297,6 +310,7 @@ MObject boneDynamicsNode::s_enable;
 MObject boneDynamicsNode::s_time;
 MObject boneDynamicsNode::s_resetTime;
 MObject boneDynamicsNode::s_timeScale;
+MObject boneDynamicsNode::s_simulationScale;
 
 MObject boneDynamicsNode::s_offsetMatrix;
 MObject boneDynamicsNode::s_offsetMatrixWeight;
@@ -365,7 +379,7 @@ MObject boneDynamicsNode::s_meshColCutoff;
 
 MObject boneDynamicsNode::s_outputRotate;
 
-boneDynamicsNode::boneDynamicsNode() : m_isSimulationInitialized(false), m_hasPrevTime(false), m_prevFrameSeconds(0.0), m_lastSeed(-1), m_turbStep(0) {
+boneDynamicsNode::boneDynamicsNode() : m_isSimulationInitialized(false), m_hasPrevTime(false), m_prevFrameSeconds(0.0), m_prevSimulationScale(1.0), m_lastSeed(-1), m_turbStep(0) {
     m_rngState[0] = 0;
     m_rngState[1] = 0;
     m_rngState[2] = 0;
@@ -436,6 +450,10 @@ MStatus boneDynamicsNode::initialize()
     s_timeScale = nAttr.create("timeScale", "ts", MFnNumericData::kDouble, 1.0);
     nAttr.setKeyable(true);
     nAttr.setMin(0);
+
+    s_simulationScale = nAttr.create("simulationScale", "ss", MFnNumericData::kDouble, 1.0);
+    nAttr.setKeyable(true);
+    nAttr.setMin(1e-6);
 
     // input attributes
     s_offsetMatrix = mAttr.create("offsetMatrix", "ofmtx");
@@ -693,6 +711,7 @@ MStatus boneDynamicsNode::initialize()
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_time));
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_resetTime));
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_timeScale));
+    CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_simulationScale));
 
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_offsetMatrix));
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_offsetMatrixWeight));
@@ -754,6 +773,7 @@ MStatus boneDynamicsNode::initialize()
         s_time,
         s_resetTime,
         s_timeScale,
+        s_simulationScale,
 
         s_offsetMatrix,
         s_offsetMatrixWeight,
@@ -906,8 +926,22 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         return MS::kSuccess;
     }
 
-    // build initial pose data
-    InitialPoseData initialPose = buildInitialPoseData(data);
+    const double simulationScale = data.inputValue(s_simulationScale).asDouble();
+    if (!std::isfinite(simulationScale) || simulationScale <= 0.0) {
+        MGlobal::displayError("boneDynamicsNode: simulationScale must be finite and greater than zero.");
+        return MS::kInvalidParameter;
+    }
+
+    // Keep the world pose for output conversion. Integration state, geometry
+    // and length constraints below use uniformly scaled coordinates.
+    const InitialPoseData worldPose = buildInitialPoseData(data);
+    InitialPoseData initialPose = worldPose;
+    initialPose.boneWorldTranslate *= simulationScale;
+    initialPose.endWorldTranslate *= simulationScale;
+    initialPose.distance *= simulationScale;
+    initialPose.radius *= simulationScale;
+    initialPose.rootRadius *= simulationScale;
+    initialPose.offsetMatrix = scaleMatrixTranslation(worldPose.offsetMatrix, simulationScale);
     
     // dynamic parameters
     DynamicsParameters dynamicsParams = getDynamicsParameters(data);
@@ -926,6 +960,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         m_prevTime = time;
         m_hasPrevTime = true;
         m_prevFrameSeconds = frameSeconds;
+        m_prevSimulationScale = simulationScale;
         m_turbStep = 0;
 
         if (dynamicsParams.enableTurbulence) {
@@ -948,7 +983,8 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     };
 
     // reset and initialization
-    if (time <= resetTime || !m_isSimulationInitialized || frameSeconds != m_prevFrameSeconds) {
+    if (time <= resetTime || !m_isSimulationInitialized || frameSeconds != m_prevFrameSeconds ||
+        simulationScale != m_prevSimulationScale) {
         resetSimulation();
         outputInitialRotation();
         CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
@@ -979,8 +1015,8 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     }
 
     auto outputRotationFromPosition = [&](const MVector& simulatedPosition) {
-        const MVector initVec = (initialPose.endWorldTranslate - initialPose.boneWorldTranslate) * initialPose.boneInitialParentInverseMatrix;
-        const MVector targetVec = (simulatedPosition - initialPose.boneWorldTranslate) * initialPose.boneInitialParentInverseMatrix;
+        const MVector initVec = (worldPose.endWorldTranslate - worldPose.boneWorldTranslate) * worldPose.boneInitialParentInverseMatrix;
+        const MVector targetVec = (simulatedPosition / simulationScale - worldPose.boneWorldTranslate) * worldPose.boneInitialParentInverseMatrix;
         const MQuaternion quat(initVec, targetVec);
         const MTransformationMatrix offseted_rotation = quat.asMatrix() * initialPose.roMatrix;
         const MQuaternion offseted_quat = offseted_rotation.rotation();
@@ -1013,7 +1049,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 
     // collision
     const bool enableGroundCol = data.inputValue(s_enableGroundCol).asBool();
-    const double groundHeight = data.inputValue(s_groundHeight).asDouble();
+    const double groundHeight = data.inputValue(s_groundHeight).asDouble() * simulationScale;
 
     MArrayDataHandle sphereColArrayHandle = data.inputArrayValue(s_sphereCollider);
     const unsigned int scCount = sphereColArrayHandle.elementCount();
@@ -1029,7 +1065,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 
     MArrayDataHandle meshColArrayHandle = data.inputArrayValue(s_meshCollider);
     const unsigned int mcCount = meshColArrayHandle.elementCount();
-    const double meshColCutoff = data.inputValue(s_meshColCutoff).asDouble();
+    const double meshColCutoff = data.inputValue(s_meshColCutoff).asDouble() * simulationScale;
 
     // bone as capsule
     const bool boneAsCapsule = data.inputValue(s_boneAsCapsule).asBool();
@@ -1056,8 +1092,8 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             const double sphereColRadius = sphereCollider.child(s_sphereColRad).asDouble() * sphereColScale[2];
 
             SphereColliderData sphereColData;
-            sphereColData.center = sphereColPosition;
-            sphereColData.radius = sphereColRadius;
+            sphereColData.center = sphereColPosition * simulationScale;
+            sphereColData.radius = sphereColRadius * simulationScale;
 
             sphereColliders[scIdx] = sphereColData;
         };
@@ -1076,10 +1112,10 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             const double capsuleColRadiusB = capsuleCollider.child(s_capsuleColRadB).asDouble() * capsuleColScale[2];
 
             CapsuleColliderData capsuleColData;
-            capsuleColData.pointA = capsuleColPositionA;
-            capsuleColData.pointB = capsuleColPositionB;
-            capsuleColData.radiusA = capsuleColRadiusA;
-            capsuleColData.radiusB = capsuleColRadiusB;
+            capsuleColData.pointA = capsuleColPositionA * simulationScale;
+            capsuleColData.pointB = capsuleColPositionB * simulationScale;
+            capsuleColData.radiusA = capsuleColRadiusA * simulationScale;
+            capsuleColData.radiusB = capsuleColRadiusB * simulationScale;
 
             capsuleColliders[ccIdx] = capsuleColData;
         }
@@ -1102,10 +1138,10 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             const double capsuleColRadiusB = capsuleColliderInput.child(s_capsuleColliderRadiusB).asDouble() * capsuleColScale[2];
 
             CapsuleColliderData capsuleColData;
-            capsuleColData.pointA = capsuleColPointA;
-            capsuleColData.pointB = capsuleColPointB;
-            capsuleColData.radiusA = capsuleColRadiusA;
-            capsuleColData.radiusB = capsuleColRadiusB;
+            capsuleColData.pointA = capsuleColPointA * simulationScale;
+            capsuleColData.pointB = capsuleColPointB * simulationScale;
+            capsuleColData.radiusA = capsuleColRadiusA * simulationScale;
+            capsuleColData.radiusB = capsuleColRadiusB * simulationScale;
 
             capsuleColliders[ccCount + cciIdx] = capsuleColData; // add to the end of the vector
         }
@@ -1119,7 +1155,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             const MVector iPlaneColNormal = MVector::yAxis.transformAsNormal(iPlaneColMatrix.asMatrix()); // Specified by y-axis
 
             InfinitePlaneColliderData iPlaneCol;
-            iPlaneCol.point = iPlaneColPosition;
+            iPlaneCol.point = iPlaneColPosition * simulationScale;
             iPlaneCol.normal = iPlaneColNormal;
 
             iPlaneColliders[pcIdx] = iPlaneCol;
@@ -1179,7 +1215,8 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             ++m_turbStep;
         }
 
-        // external force
+        // Forces retain their parameter values in simulation space. Scaling
+        // geometry down increases gravity/wind's relative displacement.
         // gravity
         MVector externalForce = dynamicsParams.gravity * dynamicsParams.gravityMultiply;
 
@@ -1268,7 +1305,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             // mesh collision (experimental)
             for (const MObject& meshCol : meshColliders)
             {
-                solveMeshCollision(nextPosition, meshCol, initialPose.radius, meshColCutoff);
+                solveMeshCollision(nextPosition, meshCol, initialPose.radius, meshColCutoff, simulationScale);
             }
 
             // ground collision

@@ -50,6 +50,7 @@ public:
     static MObject s_rotationOffset;    // rotation value to add to initial pose
 
     // scale
+    static MObject s_simulationScale;   // world lengths multiplied on entry to the solver
     static MObject s_boneScale;         // use to calculate "End World Translate"
     static MObject s_boneInverseScale;  // use to calculate "End World Translate" and scale "Radius"
     static MObject s_endScale;          // use to scale "Radius"
@@ -152,6 +153,7 @@ private:
     MTime m_prevTime;                   // last evaluated scene time
     bool m_hasPrevTime;                 // whether m_prevTime is valid
     double m_prevFrameSeconds;          // reset state when the scene frame rate changes
+    double m_prevSimulationScale;       // persistent positions and velocities use this scale
     MMatrix m_prevOffsetMatrix;
     MVector m_position;
     MVector m_velocity;

@@ -76,6 +76,28 @@ over 1/15 second reset the state. Use Play every frame to avoid playback skips.
 Scene inputs are sampled once per evaluation; faster motion can still exceed
 what the viewport frame rate can show.
 
+`simulationScale` controls the size used by the solver independently of
+`timeScale`. Its default is `1.0` and its minimum is `0.000001`. World positions,
+bone lengths, radii, collider geometry, ground height, mesh collision cutoff and
+offset translations are multiplied by this value before solving. The simulated
+position is converted back to world space for the output rotation; scene objects
+and collider previews retain their actual size.
+
+For example, `simulationScale=0.01` makes a 100 m section simulate at a 1 m
+geometric scale. Gravity, additional force and turbulence strength retain their
+numeric values in simulation space, so reducing the scale increases their effect
+relative to the bone length. Nonlinear elasticity uses the scaled distances;
+mass, damping and angle limits retain their parameter values. This is an artistic
+dynamics control, rather than an automatic conversion of Maya's display units.
+Changing the value resets simulation on its next evaluation, including when
+changed by animation. Set it before replaying from the reset frame.
+
+```python
+from maya import cmds
+cmds.setAttr("boneDynamicsNode1.simulationScale", 0.01)
+# Or pass simulationScale=0.01 to bdn.create_dynamics_node(bon, end, ...).
+```
+
 Sphere `radius` and capsule `radiusA`, `radiusB`, and `height` support animated
 viewport previews. The draw overrides read their current values on each viewport
 update, including during Evaluation Manager playback.

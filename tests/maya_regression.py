@@ -43,7 +43,145 @@ def simulate(scale, frames, mode="off", unit="ntsc", turbulence=False, start_fra
     return samples
 
 
+def simulate_geometry(world_scale=1.0, simulation_scale=None, collision=None,
+                      elastic_function=0, moving_offset=False, parent_transform=False,
+                      bone_capsule=False, time_scale=1.0, mode="off"):
+    """Geometrically similar scenes must match when solver sizes match."""
+    cmds.file(new=True, force=True)
+    cmds.currentUnit(time="ntsc", linear="cm")
+    cmds.evaluationManager(mode=mode)
+    node, target = make_solver(time_scale)
+    if simulation_scale is not None:
+        cmds.setAttr(node + ".simulationScale", simulation_scale)
+    origin = (2, 3, -1)
+    cmds.setAttr(node + ".boneTranslate", *(v * world_scale for v in origin))
+    cmds.setAttr(node + ".endTranslate", 10 * world_scale, 0, 0)
+    cmds.setAttr(node + ".radius", 0.3 * world_scale)
+    cmds.setAttr(node + ".rootRadius", 0.2 * world_scale)
+    cmds.setAttr(node + ".boneAsCapsule", bone_capsule)
+    cmds.setAttr(node + ".elasticForceFunction", elastic_function)
+    cmds.setAttr(node + ".enableTurbulence", True)
+    cmds.setAttr(node + ".turbulenceStrength", 20)
+    cmds.setAttr(node + ".additionalForce", 0, 0, 30)
+    cmds.setAttr(node + ".enableAngleLimit", True)
+    cmds.setAttr(node + ".angleLimit", 150)
+
+    def matrix_at(offset):
+        return (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+                (origin[0] + offset[0]) * world_scale,
+                (origin[1] + offset[1]) * world_scale,
+                (origin[2] + offset[2]) * world_scale, 1)
+
+    if collision == "sphere":
+        cmds.setAttr(node + ".sphereCollider[0].sphereColMatrix",
+                     *matrix_at((9, -1, 0)), type="matrix")
+        cmds.setAttr(node + ".sphereCollider[0].sphereColRadius", 2 * world_scale)
+    elif collision == "capsule":
+        cmds.setAttr(node + ".capsuleCollider[0].capsuleColMatrixA",
+                     *matrix_at((9, -3, 1)), type="matrix")
+        cmds.setAttr(node + ".capsuleCollider[0].capsuleColMatrixB",
+                     *matrix_at((9, 3, 1)), type="matrix")
+        cmds.setAttr(node + ".capsuleCollider[0].capsuleColRadiusA", 1.8 * world_scale)
+        cmds.setAttr(node + ".capsuleCollider[0].capsuleColRadiusB", 1.4 * world_scale)
+    elif collision == "capsuleInput":
+        cmds.setAttr(node + ".capsuleColliderInput[0].capsuleColliderMatrix",
+                     *matrix_at((9, 0, 1)), type="matrix")
+        cmds.setAttr(node + ".capsuleColliderInput[0].capsuleColliderHeight", 6 * world_scale)
+        cmds.setAttr(node + ".capsuleColliderInput[0].capsuleColliderRadiusA", 1.4 * world_scale)
+        cmds.setAttr(node + ".capsuleColliderInput[0].capsuleColliderRadiusB", 1.8 * world_scale)
+    elif collision == "plane":
+        cmds.setAttr(node + ".infinitePlaneCollider[0].infinitePlaneColMatrix",
+                     *matrix_at((0, -1, 0)), type="matrix")
+    elif collision == "ground":
+        cmds.setAttr(node + ".enableGroundCol", True)
+        cmds.setAttr(node + ".groundHeight", (origin[1] - 1) * world_scale)
+    elif collision == "mesh":
+        mesh = cmds.polyPlane(width=40 * world_scale, height=40 * world_scale,
+                              subdivisionsX=1, subdivisionsY=1, axis=(0, 1, 0))[0]
+        cmds.setAttr(mesh + ".translate", origin[0] * world_scale,
+                     (origin[1] - 1) * world_scale, origin[2] * world_scale)
+        shape = cmds.listRelatives(mesh, shapes=True)[0]
+        cmds.connectAttr(shape + ".worldMesh[0]", node + ".meshCollider[0]")
+        cmds.setAttr(node + ".meshColCutoff", 10 * world_scale)
+
+    if parent_transform:
+        parent = cmds.createNode("transform")
+        cmds.setAttr(parent + ".translate", 50 * world_scale, 20 * world_scale, -10 * world_scale)
+        cmds.setAttr(parent + ".rotate", 10, 20, 30)
+        cmds.setAttr(parent + ".scale", 1.25, 0.8, 1.5)
+        cmds.connectAttr(parent + ".worldMatrix[0]", node + ".boneParentMatrix")
+        cmds.connectAttr(parent + ".worldInverseMatrix[0]", node + ".boneParentInverseMatrix")
+
+    if moving_offset:
+        offset = cmds.createNode("transform")
+        cmds.connectAttr(offset + ".worldMatrix[0]", node + ".offsetMatrix")
+        cmds.setAttr(node + ".offsetMatrixWeight", 0.65)
+
+    samples = []
+    for frame in range(13):
+        if moving_offset:
+            cmds.setAttr(offset + ".translate", 0.2 * frame * world_scale,
+                         0.15 * frame * world_scale, -0.1 * frame * world_scale)
+            cmds.setAttr(offset + ".rotateZ", frame * 2)
+        cmds.currentTime(frame)
+        samples.append(cmds.getAttr(target + ".rotate")[0])
+    return samples
+
+
 class DynamicsRegression(unittest.TestCase):
+    def assert_samples_equal(self, actual, expected, tolerance=1e-6):
+        for row_a, row_b in zip(actual, expected):
+            for a, b in zip(row_a, row_b):
+                self.assertTrue(math.isfinite(a))
+                self.assertAlmostEqual(a, b, delta=tolerance)
+
+    def test_simulation_scale_matches_smaller_geometry(self):
+        for mode in ("off", "serial", "parallel"):
+            for elastic_function in (0, 1, 2):
+                for world_scale in (1000, 0.1):
+                    with self.subTest(mode=mode, elastic=elastic_function, size=world_scale):
+                        expected = simulate_geometry(elastic_function=elastic_function, mode=mode)
+                        actual = simulate_geometry(world_scale, 1.0 / world_scale,
+                                                   elastic_function=elastic_function, mode=mode)
+                        self.assert_samples_equal(actual, expected)
+
+    def test_simulation_scale_preserves_collision_geometry(self):
+        for collision in ("sphere", "capsule", "capsuleInput", "plane", "ground", "mesh"):
+            for bone_capsule in (False, True):
+                with self.subTest(collision=collision, bone_capsule=bone_capsule):
+                    expected = simulate_geometry(collision=collision, bone_capsule=bone_capsule)
+                    free = simulate_geometry(bone_capsule=bone_capsule)
+                    self.assertGreater(max(abs(a - b) for ra, rb in zip(expected, free)
+                                           for a, b in zip(ra, rb)), 0.01)
+                    for world_scale in (1000, 0.1):
+                        actual = simulate_geometry(world_scale, 1.0 / world_scale,
+                                                   collision=collision, bone_capsule=bone_capsule)
+                        self.assert_samples_equal(actual, expected, tolerance=1e-4)
+
+    def test_simulation_scale_with_offset_parent_and_time_scale(self):
+        for time_scale in (0.1, 1, 3.5):
+            expected = simulate_geometry(moving_offset=True, parent_transform=True,
+                                         time_scale=time_scale)
+            actual = simulate_geometry(1000, 0.001, moving_offset=True,
+                                       parent_transform=True, time_scale=time_scale)
+            self.assert_samples_equal(actual, expected)
+
+    def test_simulation_scale_default_and_changes(self):
+        expected = simulate_geometry()
+        self.assert_samples_equal(simulate_geometry(simulation_scale=1), expected)
+        node = cmds.ls(type="boneDynamicsNode")[0]
+        target = cmds.listConnections(node + ".outputRotate", destination=True)[0]
+        self.assertEqual(cmds.attributeQuery("simulationScale", node=node, listDefault=True), [1])
+        # A same-frame scale change invalidates the output and clears old state.
+        cmds.setAttr(node + ".simulationScale", 0.01)
+        self.assertEqual(cmds.getAttr(target + ".rotate")[0], (0, 0, 0))
+        cmds.currentTime(13)
+        actual = cmds.getAttr(target + ".rotate")[0]
+        cmds.currentTime(0)
+        cmds.getAttr(target + ".rotate")
+        cmds.currentTime(1)
+        self.assert_samples_equal([actual], cmds.getAttr(target + ".rotate"))
+
     def test_frame_rate_step_selection_preserves_real_time(self):
         # A full frame must match N frames at 1/N speed with static inputs.
         # Turbulence also detects an incorrect number of internal RNG updates.
