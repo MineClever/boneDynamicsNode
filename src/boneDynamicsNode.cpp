@@ -2,6 +2,7 @@
 #include "boneDynamicsUtils.h"
 #include "nodeIds.h"
 #include "mathUtils.h"
+#include "colliderNode/meshColliderNode.h"
 
 #include <maya/MFnNumericAttribute.h>
 #include <maya/MFnCompoundAttribute.h>
@@ -263,22 +264,15 @@ namespace
     }
 
     // mesh collision
-    void getClosestPoint(const MObject& mesh, const MPoint& point, MPoint& closestPoint, MVector& closestNormal)
-    {
-        // update closestPoint and closestNormal
-
-        MFnMesh fnMesh(mesh);
-        fnMesh.getClosestPointAndNormal(point, closestPoint, closestNormal, MSpace::kWorld);
-    }
-
-    void solveMeshCollision(MVector& position, const MObject& meshCol, double radius, double cutoff, double simulationScale)
+    void solveMeshCollision(MVector& position, const meshCollision::Snapshot& meshCol, double radius, double cutoff, double simulationScale)
     {
         // Get the closest point and closest normal on a mesh
-        MPoint closestPoint;
+        MVector closestPoint;
         MVector closestNormal;
         // The Maya mesh remains in world space; only query/results cross the
         // simulation boundary. Normals are unchanged by a positive uniform scale.
-        getClosestPoint(meshCol, MPoint(position / simulationScale), closestPoint, closestNormal);
+        unsigned int triangle;
+        if (!meshCol.closest(position / simulationScale, closestPoint, closestNormal, triangle)) return;
         const MVector simulationClosestPoint = MVector(closestPoint) * simulationScale;
         closestNormal = closestNormal.normal();
 
@@ -376,6 +370,8 @@ MObject boneDynamicsNode::s_iPlaneColMtx;
 
 MObject boneDynamicsNode::s_meshCollider;
 MObject boneDynamicsNode::s_meshColCutoff;
+MObject boneDynamicsNode::s_meshColliderData;
+MObject boneDynamicsNode::s_meshCollisionUnresolved;
 
 MObject boneDynamicsNode::s_outputRotate;
 
@@ -697,6 +693,14 @@ MStatus boneDynamicsNode::initialize()
     nAttr.setKeyable(true);
     nAttr.setMin(0);
 
+    s_meshColliderData = tAttr.create("meshColliderData", "mcd", MeshColliderData::id);
+    tAttr.setArray(true);
+    tAttr.setUsesArrayDataBuilder(true);
+    tAttr.setStorable(false);
+    s_meshCollisionUnresolved = nAttr.create("meshCollisionUnresolved", "mcu", MFnNumericData::kBoolean, false);
+    nAttr.setWritable(false);
+    nAttr.setStorable(false);
+
     // output attributes
     x = uAttr.create("outputRotateX", "outrx", MFnUnitAttribute::kAngle, 0.0);
     y = uAttr.create("outputRotateY", "outry", MFnUnitAttribute::kAngle, 0.0);
@@ -763,6 +767,8 @@ MStatus boneDynamicsNode::initialize()
 
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_meshCollider));
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_meshColCutoff));
+    CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_meshColliderData));
+    CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_meshCollisionUnresolved));
 
     CHECK_MSTATUS_AND_RETURN_IT(addAttribute(s_outputRotate));
     
@@ -832,12 +838,14 @@ MStatus boneDynamicsNode::initialize()
         s_iPlaneColMtx,
         s_iPlaneCollider,
         s_meshCollider,
+        s_meshColliderData,
         s_meshColCutoff
     };
 
     for (const MObject& input : simulationInputs)
     {
         CHECK_MSTATUS_AND_RETURN_IT(attributeAffects(input, s_outputRotate));
+        CHECK_MSTATUS_AND_RETURN_IT(attributeAffects(input, s_meshCollisionUnresolved));
     }
 
     return MS::kSuccess;
@@ -908,20 +916,26 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 {
     const MPlug computePlug = plug.isChild() ? plug.parent() : plug;
     
-    if (computePlug != s_outputRotate)
+    if (computePlug != s_outputRotate && computePlug != s_meshCollisionUnresolved)
     {
         return MS::kUnknownParameter;
     }
 
     // output data handles
     MDataHandle outputRotateHandle = data.outputValue(s_outputRotate);
+    bool meshCollisionUnresolved = false;
+    auto cleanOutputs = [&]() -> MStatus {
+        data.outputValue(s_meshCollisionUnresolved).setBool(meshCollisionUnresolved);
+        CHECK_MSTATUS_AND_RETURN_IT(data.setClean(s_outputRotate));
+        return data.setClean(s_meshCollisionUnresolved);
+    };
     
     // check enable
     const bool enable = data.inputValue(s_enable).asBool();
     if (!enable)
     {
         outputRotateHandle.set3Double(0.0, 0.0, 0.0);
-        CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
+        CHECK_MSTATUS_AND_RETURN_IT(cleanOutputs());
 
         return MS::kSuccess;
     }
@@ -951,6 +965,19 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     const MTime resetTime = data.inputValue(s_resetTime).asTime();
     const double frameSeconds = MTime(1.0, MTime::uiUnit()).as(MTime::kSeconds);
 
+    // Pull providers even on initialization/reset, so their motion histories
+    // start with the same scene sample as this bone. Queries use immutable data.
+    std::vector<std::shared_ptr<const meshCollision::Timeline>> sampledMeshes;
+    MArrayDataHandle sampledMeshArray = data.inputArrayValue(s_meshColliderData);
+    for (unsigned int i = 0; i < sampledMeshArray.elementCount(); ++i) {
+        CHECK_MSTATUS_AND_RETURN_IT(sampledMeshArray.jumpToArrayElement(i));
+        const auto* colliderData = dynamic_cast<const MeshColliderData*>(sampledMeshArray.inputValue().asPluginData());
+        if (colliderData && colliderData->timeline) {
+            sampledMeshes.push_back(colliderData->timeline);
+            meshCollisionUnresolved |= colliderData->timeline->topologyChanged;
+        }
+    }
+
     // reset simulation state
     auto resetSimulation = [&]() {
         m_prevOffsetMatrix = initialPose.offsetMatrix;
@@ -961,6 +988,8 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         m_hasPrevTime = true;
         m_prevFrameSeconds = frameSeconds;
         m_prevSimulationScale = simulationScale;
+        m_prevMeshRoot = initialPose.boneWorldTranslate;
+        m_prevMeshRestEnd = initialPose.endWorldTranslate;
         m_turbStep = 0;
 
         if (dynamicsParams.enableTurbulence) {
@@ -987,7 +1016,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         simulationScale != m_prevSimulationScale) {
         resetSimulation();
         outputInitialRotation();
-        CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
+        CHECK_MSTATUS_AND_RETURN_IT(cleanOutputs());
 
         return MS::kSuccess;
     }
@@ -1009,7 +1038,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     if (!m_hasPrevTime || time < m_prevTime || sceneDt > kMaxSceneGapSec) {
         resetSimulation();
         outputInitialRotation();
-        CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
+        CHECK_MSTATUS_AND_RETURN_IT(cleanOutputs());
 
         return MS::kSuccess;
     }
@@ -1030,8 +1059,10 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         // A paused timeScale consumes scene time so resuming cannot accumulate a gap.
         m_prevTime = time;
         m_prevOffsetMatrix = initialPose.offsetMatrix;
+        m_prevMeshRoot = initialPose.boneWorldTranslate;
+        m_prevMeshRestEnd = initialPose.endWorldTranslate;
         outputRotationFromPosition(m_position);
-        CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
+        CHECK_MSTATUS_AND_RETURN_IT(cleanOutputs());
 
         return MS::kSuccess;
     }
@@ -1077,7 +1108,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     std::vector<SphereColliderData> sphereColliders(scCount);
     std::vector<CapsuleColliderData> capsuleColliders(ccCount + cciCount);
     std::vector<InfinitePlaneColliderData> iPlaneColliders(pcCount);
-    std::vector<MObject> meshColliders(mcCount);
+    std::vector<std::shared_ptr<const meshCollision::Snapshot>> meshColliders(mcCount);
 
     if (iter > 0)
     {
@@ -1165,16 +1196,34 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         for (unsigned int mcIdx = 0; mcIdx < mcCount; ++mcIdx) {
             CHECK_MSTATUS_AND_RETURN_IT(meshColArrayHandle.jumpToArrayElement(mcIdx));
             MDataHandle meshCollider = meshColArrayHandle.inputValue();
-            meshColliders[mcIdx] = meshCollider.asMesh();
+            bool built;
+            CHECK_MSTATUS_AND_RETURN_IT(meshCollision::snapshot(meshCollider.asMeshTransformed(), "", 0.5,
+                                       m_legacyMeshCache, meshColliders[mcIdx], built));
         }
     }
 
+    const std::size_t legacyCacheLimit = mcCount * 2 + 2;
+    if (m_legacyMeshCache.size() > legacyCacheLimit)
+        m_legacyMeshCache.erase(m_legacyMeshCache.begin(), m_legacyMeshCache.end() - legacyCacheLimit);
+
     // The offset is a scene-frame displacement, applied once regardless of substep count.
+    const MVector preOffsetPosition = m_position;
     const MPoint offsetedPosition = MPoint(m_position) * m_prevOffsetMatrix.inverse() * initialPose.offsetMatrix;
     m_position = MVector(offsetedPosition) * initialPose.offsetMatrixWeight + m_position * (1.0 - initialPose.offsetMatrixWeight);
 
     for (std::uint64_t step = 0; step < numSubSteps; ++step)
     {
+        const double alpha0 = static_cast<double>(step) / numSubSteps;
+        const double alpha1 = static_cast<double>(step + 1) / numSubSteps;
+        InitialPoseData stepPose = initialPose;
+        const bool interpolatePose = !sampledMeshes.empty();
+        const MVector meshRoot0 = interpolatePose ? m_prevMeshRoot + (initialPose.boneWorldTranslate - m_prevMeshRoot) * alpha0 : initialPose.boneWorldTranslate;
+        if (interpolatePose) {
+            stepPose.boneWorldTranslate = m_prevMeshRoot + (initialPose.boneWorldTranslate - m_prevMeshRoot) * alpha1;
+            stepPose.endWorldTranslate = m_prevMeshRestEnd + (initialPose.endWorldTranslate - m_prevMeshRestEnd) * alpha1;
+            stepPose.distance = (stepPose.endWorldTranslate - stepPose.boneWorldTranslate).length();
+        }
+        const MVector meshTip0 = step == 0 ? preOffsetPosition : m_position;
         // velocity damping (per-second exponential decay)
         m_velocity *= std::exp(-dynamicsParams.damping * subDt);
 
@@ -1221,7 +1270,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         MVector externalForce = dynamicsParams.gravity * dynamicsParams.gravityMultiply;
 
         // spring force
-        const MVector springVector = (initialPose.endWorldTranslate - nextPosition);
+        const MVector springVector = (stepPose.endWorldTranslate - nextPosition);
         const double springVectorLength = springVector.length();
         MVector springForce;
 
@@ -1268,18 +1317,18 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         for (int i = 0; i < iter; ++i)
         {
             // distance constraint
-            distanceConstraint(initialPose.boneWorldTranslate, nextPosition, initialPose.distance);
+            distanceConstraint(stepPose.boneWorldTranslate, nextPosition, stepPose.distance);
 
             // sphere collision
             for (const SphereColliderData& sphereCol : sphereColliders)
             {
                 if (boneAsCapsule)
                 {
-                    solveSphereCollision(nextPosition, initialPose.boneWorldTranslate, sphereCol, initialPose.radius, initialPose.rootRadius);
+                    solveSphereCollision(nextPosition, stepPose.boneWorldTranslate, sphereCol, stepPose.radius, stepPose.rootRadius);
                 }
                 else
                 {
-                    solveSphereCollision(nextPosition, sphereCol, initialPose.radius);
+                    solveSphereCollision(nextPosition, sphereCol, stepPose.radius);
                 }
             }
 
@@ -1288,38 +1337,38 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             {
                 if (boneAsCapsule)
                 {
-                    solveCapsuleCollision(nextPosition, initialPose.boneWorldTranslate, capsuleCol, initialPose.radius, initialPose.rootRadius);
+                    solveCapsuleCollision(nextPosition, stepPose.boneWorldTranslate, capsuleCol, stepPose.radius, stepPose.rootRadius);
                 }
                 else
                 {
-                    solveCapsuleCollision(nextPosition, capsuleCol, initialPose.radius);
+                    solveCapsuleCollision(nextPosition, capsuleCol, stepPose.radius);
                 }
             }
 
             // infinite plane collision
             for (const InfinitePlaneColliderData& iPlaneCol : iPlaneColliders)
             {
-                solveInfinitePlaneCollision(nextPosition, iPlaneCol, initialPose.radius);
+                solveInfinitePlaneCollision(nextPosition, iPlaneCol, stepPose.radius);
             }
 
             // mesh collision (experimental)
-            for (const MObject& meshCol : meshColliders)
+            for (const auto& meshCol : meshColliders)
             {
-                solveMeshCollision(nextPosition, meshCol, initialPose.radius, meshColCutoff, simulationScale);
+                solveMeshCollision(nextPosition, *meshCol, stepPose.radius, meshColCutoff, simulationScale);
             }
 
             // ground collision
             if (enableGroundCol)
             {
-                solveGroundCollision(nextPosition, groundHeight, initialPose.radius);
+                solveGroundCollision(nextPosition, groundHeight, stepPose.radius);
             };
 
             // angle limit
             if (enableAngleLimit)
             {
                 angleLimit(
-                    initialPose.boneWorldTranslate,
-                    initialPose.endWorldTranslate,
+                    stepPose.boneWorldTranslate,
+                    stepPose.endWorldTranslate,
                     nextPosition,
                     mathUtils::degToRad(angleLimitDegrees / 2.0)
                 );
@@ -1330,15 +1379,42 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         if (iter == 0 && enableAngleLimit)
         {
             angleLimit(
-                initialPose.boneWorldTranslate,
-                initialPose.endWorldTranslate,
+                stepPose.boneWorldTranslate,
+                stepPose.endWorldTranslate,
                 nextPosition,
                 mathUtils::degToRad(angleLimitDegrees / 2.0)
             );
         }
 
         // distance constraint
-        distanceConstraint(initialPose.boneWorldTranslate, nextPosition, initialPose.distance);
+        distanceConstraint(stepPose.boneWorldTranslate, nextPosition, stepPose.distance);
+
+        // Mesh contacts come last and project onto the bone-length sphere,
+        // preventing the length constraint from undoing surface separation.
+        for (int pass = 0; pass < iter && !sampledMeshes.empty(); ++pass) {
+            meshCollision::Sweep sweep;
+            sweep.root0 = meshRoot0 / simulationScale;
+            sweep.tip0 = meshTip0 / simulationScale;
+            sweep.root1 = stepPose.boneWorldTranslate / simulationScale;
+            sweep.rootRadius = stepPose.rootRadius / simulationScale;
+            sweep.tipRadius = stepPose.radius / simulationScale;
+            sweep.capsule = boneAsCapsule;
+            for (const auto& collider : sampledMeshes) {
+                MVector worldTip = nextPosition / simulationScale;
+                sweep.tip1 = worldTip;
+                const auto contact = meshCollision::solve(*collider, sweep,
+                    m_prevTime.as(MTime::kSeconds) + sceneDt * alpha0,
+                    m_prevTime.as(MTime::kSeconds) + sceneDt * alpha1, worldTip);
+                meshCollisionUnresolved |= contact.unresolved;
+                nextPosition = worldTip * simulationScale;
+            }
+            bool penetrating = false;
+            for (const auto& collider : sampledMeshes)
+                penetrating |= meshCollision::penetrating(*collider, sweep,
+                    m_prevTime.as(MTime::kSeconds) + sceneDt * alpha1, nextPosition / simulationScale);
+            if (!penetrating) break;
+            if (pass == iter - 1) meshCollisionUnresolved = true;
+        }
 
         // update velocity, position
         m_velocity = (nextPosition - m_position) / subDt;
@@ -1346,12 +1422,14 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     }
 
     m_prevOffsetMatrix = initialPose.offsetMatrix;
+    m_prevMeshRoot = initialPose.boneWorldTranslate;
+    m_prevMeshRestEnd = initialPose.endWorldTranslate;
     m_prevTime = time;
     m_hasPrevTime = true;
 
     // output local euler rotation
     outputRotationFromPosition(nextPosition);
-    CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
+    CHECK_MSTATUS_AND_RETURN_IT(cleanOutputs());
 
     return MS::kSuccess;
 }

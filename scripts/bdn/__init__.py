@@ -5,6 +5,7 @@ from .collider import (
     create_sphere_collider,
     create_capsule_collider,
     create_infinite_plane_collider,
+    create_mesh_collider,
     connect_colliders,
     disconnect_colliders,
 )
@@ -16,6 +17,7 @@ __all__ = [
     'create_sphere_collider',
     'create_capsule_collider',
     'create_infinite_plane_collider',
+    'create_mesh_collider',
     'connect_colliders',
     'disconnect_colliders',
     'create_visualizer',

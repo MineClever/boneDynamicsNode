@@ -12,7 +12,7 @@ boneDynamicsNode 是一个 Autodesk Maya 的 C++ 插件,对关节链(bone–end 
 
 ## 构建(无测试框架)
 
-项目没有自动化测试。验证方式:编译 `.mll` → 复制到 Maya 插件目录 → 在 Maya 中加载插件,运行 `sample_scripts/` 中的脚本人工验证。
+运行 `tests/maya_regression.py` 和 `tests/mesh_collider_regression.py`，参数为重编译 `.mll` 的绝对路径，使用 Maya 2022 的 mayapy。性能冒烟检查见 `tests/mesh_collider_benchmark.py`。视口仍需在交互式 Maya 中验证。
 
 ### Windows 全版本构建
 
@@ -35,25 +35,27 @@ cmake --build build/win64_2027
 
 ### C++ 插件(`src/`)
 
-`pluginMain.cpp` 是唯一入口,注册/注销全部 **5 个节点**,每个碰撞体/可视化器节点还注册了 `MHWRender::MDrawOverrideCreator`(视口绘制器):
+`pluginMain.cpp` 是唯一入口，注册/注销 **6 个节点和 1 个自定义数据类型**。locator 碰撞体/可视化器还注册视口绘制器：
 
 | 节点 | 类型 | 作用 |
 |---|---|---|
 | `boneDynamicsNode` | `MPxNode` | 核心模拟节点,`compute()` 中执行动力学积分与约束求解 |
 | `sphereColliderNode` / `capsuleColliderNode` / `infinitePlaneColliderNode` | `MPxLocatorNode` | 三种碰撞体,`colliderNode/` 目录 |
 | `boneDynamicsVisualizer` | `MPxLocatorNode` | 显示模拟出的末端姿态,`visualizerNode/` 目录 |
+| `meshColliderNode` | `MPxNode` | 共享网格快照、子帧采样、原生查询缓存，输出 `MeshColliderData` |
 
 - `boneDynamicsNode.{h,cpp}`:所有动力学/变换/碰撞参数都是该节点的静态 `MObject` 属性(`s_*`,见头文件中的分组注释);模拟状态(`m_position`、`m_velocity`、湍流 RNG 状态)保存在节点实例中
 - `boneDynamicsUtils.{h,cpp}`:纯数学层,`BoneInput` → `PoseData` 的构建;被主节点和可视化节点共享,不含 Maya 依赖之外的逻辑
 - `mathUtils.{h,cpp}`:底层数学工具
 - `nodeIds.h`:所有节点 ID 的唯一出处
+- `colliderNode/meshCollision.*`:MMeshIntersector 缓存、原生 swept-AABB broad phase、变半径胶囊/三角面 CCD 和接触约束。设计及限制见 `docs/mesh_colliders.md`。
 
 ### Python 辅助包(`scripts/bdn/`)
 
 `bdn` 包通过 Maya 的 `cmds` 实现程序化装配,公共 API 从 `__init__.py` 导出:
 
 - `core.py`:`create_dynamics_node()` — 核心装配函数(创建节点、连接关节矩阵、支持缩放/目标姿势/偏移节点/碰撞体/可视化器,见函数 docstring)
-- `collider.py`:创建三种碰撞体,以及 `connect_colliders` / `disconnect_colliders`
+- `collider.py`:创建球体、胶囊、平面和共享 Mesh 碰撞体，以及 `connect_colliders` / `disconnect_colliders`
 - `visualize.py`:创建可视化器
 - `utils.py`:公共工具,`load_plugin()`(自动加载 .mll)、`undo_chunk`、`with_traceback` 装饰器
 - `version.py`:`__version__`

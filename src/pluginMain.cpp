@@ -2,6 +2,7 @@
 #include "colliderNode/sphereColliderNode.h"
 #include "colliderNode/capsuleColliderNode.h"
 #include "colliderNode/infinitePlaneColliderNode.h"
+#include "colliderNode/meshColliderNode.h"
 #include "visualizerNode/boneDynamicsVisualizer.h"
 
 #include <maya/MFnPlugin.h>
@@ -17,6 +18,10 @@ MStatus initializePlugin(MObject obj)
 {
     MStatus status;
     MFnPlugin plugin(obj, "Hiroyuki Akasaki", "0.5.0", "Any");
+
+    CHECK_MSTATUS_AND_RETURN_IT(plugin.registerData("boneDynamicsMeshColliderData", MeshColliderData::id, MeshColliderData::creator));
+    CHECK_MSTATUS_AND_RETURN_IT(plugin.registerNode("meshColliderNode", meshColliderNode::s_id,
+                                                  meshColliderNode::creator, meshColliderNode::initialize));
 
     // boneDynamicsNode
     status = plugin.registerNode(
@@ -150,6 +155,9 @@ MStatus uninitializePlugin(MObject obj)
     // boneDynamicsNode
     status = plugin.deregisterNode(boneDynamicsNode::s_id);
     CHECK_MSTATUS_AND_RETURN_IT(status);
+
+    CHECK_MSTATUS_AND_RETURN_IT(plugin.deregisterNode(meshColliderNode::s_id));
+    CHECK_MSTATUS_AND_RETURN_IT(plugin.deregisterData(MeshColliderData::id));
 
     return MS::kSuccess;
 }

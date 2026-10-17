@@ -20,6 +20,10 @@ set(SOURCE_FILES
    colliderNode/capsuleColliderNode.cpp
    colliderNode/infinitePlaneColliderNode.h
    colliderNode/infinitePlaneColliderNode.cpp
+   colliderNode/meshColliderNode.h
+   colliderNode/meshColliderNode.cpp
+   colliderNode/meshCollision.h
+   colliderNode/meshCollision.cpp
    visualizerNode/visualizerGeometry.h
    visualizerNode/visualizerGeometry.cpp
    visualizerNode/boneDynamicsVisualizer.h

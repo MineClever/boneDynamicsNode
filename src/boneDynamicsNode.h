@@ -4,6 +4,7 @@
 #define NOMINMAX  
 
 #include "boneDynamicsUtils.h"
+#include "colliderNode/meshCollision.h"
 
 #include <maya/MPxNode.h>
 #include <maya/MTypeId.h>
@@ -112,6 +113,8 @@ public:
 
     static MObject s_meshCollider;      // meshCollider array
     static MObject s_meshColCutoff;     // max distance for mesh collision detection
+    static MObject s_meshColliderData;  // shared sampled MeshColliderData connections
+    static MObject s_meshCollisionUnresolved;
     
     // output
     static MObject s_outputRotate;       // output euler rotation
@@ -157,6 +160,8 @@ private:
     MMatrix m_prevOffsetMatrix;
     MVector m_position;
     MVector m_velocity;
+    MVector m_prevMeshRoot, m_prevMeshRestEnd;
+    std::vector<std::shared_ptr<const meshCollision::Snapshot>> m_legacyMeshCache;
 
     // turbulence state
     int m_lastSeed;

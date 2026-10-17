@@ -1,0 +1,24 @@
+global proc AEmeshColliderNodeTemplate(string $nodeName)
+{
+    editorTemplate -beginScrollLayout;
+        editorTemplate -beginLayout "Mesh Collider" -collapse false;
+            editorTemplate -addControl "inputMesh";
+            editorTemplate -addControl "time";
+            editorTemplate -label "Continuous Collision Detection" -addControl "continuous";
+            editorTemplate -label "Motion Time Samples" -addControl "timeSamples";
+            editorTemplate -label "Contact Offset" -addControl "contactOffset";
+        editorTemplate -endLayout;
+        editorTemplate -beginLayout "Excluded Faces" -collapse false;
+            editorTemplate -label "Exclusion Color Set" -addControl "excludeColorSet";
+            editorTemplate -label "Red Channel Threshold" -addControl "excludeThreshold";
+        editorTemplate -endLayout;
+        editorTemplate -beginLayout "Diagnostics" -collapse true;
+            editorTemplate -addControl "geometryBuilds";
+            editorTemplate -addControl "sampleCount";
+            editorTemplate -addControl "topologyChanged";
+        editorTemplate -endLayout;
+        editorTemplate -suppress "outputCollider";
+        AEdependNodeTemplate $nodeName;
+        editorTemplate -addExtraControls;
+    editorTemplate -endScrollLayout;
+}

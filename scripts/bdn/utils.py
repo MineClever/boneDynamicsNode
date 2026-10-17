@@ -39,6 +39,9 @@ def with_traceback(func):
 def load_plugin(*args):
     # type: (*object) -> bool
     try:
+        # An explicitly loaded absolute path need not be on MAYA_PLUG_IN_PATH.
+        if 'boneDynamicsNode' in (cmds.pluginInfo(query=True, listPlugins=True) or []):
+            return True
         result = cmds.loadPlugin("boneDynamicsNode.mll", qt=True)
         if result is not None:
             plugin_ver = cmds.pluginInfo("boneDynamicsNode.mll", q=True, version=True)

@@ -3,6 +3,55 @@ from maya import cmds
 from . import utils
 
 
+def _mesh_source(mesh):
+    """Resolve a visible mesh and the selected DAG instance's worldMesh plug."""
+    from maya.api import OpenMaya as om
+    if cmds.nodeType(mesh) == 'mesh':
+        shape = cmds.ls(mesh, long=True)[0]
+    else:
+        shapes = cmds.listRelatives(mesh, shapes=True, noIntermediate=True, fullPath=True) or []
+        shapes = [s for s in shapes if cmds.nodeType(s) == 'mesh']
+        if len(shapes) != 1:
+            raise ValueError("Expected one visible mesh shape: {}".format(mesh))
+        shape = shapes[0]
+    selected = om.MSelectionList()
+    selected.add(shape)
+    return '{}.worldMesh[{}]'.format(shape, selected.getDagPath(0).instanceNumber())
+
+
+@utils.with_traceback
+@utils.undo_chunk
+def create_mesh_collider(mesh, exclude_color_set='bdnCollisionExclude', time_samples=4,
+                         contact_offset=0.001, continuous=True, reuse=True, name=None):
+    """Return a shared DG collider for an independently driven Maya mesh.
+
+    time_samples specifies linear motion intervals per evaluated frame.
+    Faces whose ALL corner colors have red >= excludeThreshold are excluded.
+    Missing colors retain collision; contact_offset uses the scene length unit.
+    A skin driven by this same dynamics chain would form a dependency cycle.
+    """
+    if not utils.load_plugin():
+        raise RuntimeError("Failed to load boneDynamicsNode plugin.")
+    source = _mesh_source(mesh)
+    if reuse:
+        for existing in cmds.listConnections(source, source=False, destination=True,
+                                             type='meshColliderNode') or []:
+            if (cmds.getAttr(existing + '.excludeColorSet') == exclude_color_set and
+                    cmds.getAttr(existing + '.timeSamples') == time_samples and
+                    abs(cmds.getAttr(existing + '.contactOffset') - contact_offset) < 1e-12 and
+                    cmds.getAttr(existing + '.continuous') == continuous):
+                return existing
+    options = {'name': name} if name else {}
+    node = cmds.createNode('meshColliderNode', **options)
+    cmds.setAttr(node + '.excludeColorSet', exclude_color_set, type='string')
+    cmds.setAttr(node + '.timeSamples', time_samples)
+    cmds.setAttr(node + '.contactOffset', contact_offset)
+    cmds.setAttr(node + '.continuous', continuous)
+    cmds.connectAttr(source, node + '.inputMesh')
+    cmds.connectAttr('time1.outTime', node + '.time')
+    return node
+
+
 @utils.with_traceback
 @utils.undo_chunk
 def create_sphere_collider(radius=1.0, *args, **kwargs):
@@ -93,7 +142,8 @@ def disconnect_colliders(bone_dynamics_node, collider_attributes=None, *args):
             'capsuleCollider',
             'capsuleColliderInput',
             'infinitePlaneCollider',
-            'meshCollider'
+            'meshCollider',
+            'meshColliderData'
         ]
 
     for col_attr in collider_attributes:
@@ -124,6 +174,7 @@ class _ColliderConnector:
         self.capsule_col_input_idx = _get_next_index('capsuleColliderInput')  # type: int
         self.iplane_col_idx = _get_next_index('infinitePlaneCollider')  # type: int
         self.mesh_col_idx = _get_next_index('meshCollider')  # type: int
+        self.mesh_data_idx = _get_next_index('meshColliderData')
 
     def connect_sphere(self, matrix_attr, radius_attr):
         # type: (str, str) -> None
@@ -156,6 +207,10 @@ class _ColliderConnector:
         # type: (str) -> None
         cmds.connectAttr(mesh_attr, '{}.meshCollider[{}]'.format(self.bone_dynamics_node, self.mesh_col_idx), f=True)
         self.mesh_col_idx += 1
+
+    def connect_mesh_data(self, collider_attr):
+        cmds.connectAttr(collider_attr, '{}.meshColliderData[{}]'.format(self.bone_dynamics_node, self.mesh_data_idx), f=True)
+        self.mesh_data_idx += 1
 
 
 @utils.with_traceback
@@ -196,7 +251,15 @@ def connect_colliders(bone_dynamics_node, colliders, replace=False, *args):
 
         is_found = False
 
-        col_shape = cmds.listRelatives(col, s=True, f=True)
+        if cmds.nodeType(col) == 'meshColliderNode':
+            connector.connect_mesh_data(col + '.outputCollider')
+            continue
+        if cmds.nodeType(col) == 'mesh':
+            mesh_collider = create_mesh_collider(col)
+            connector.connect_mesh_data(mesh_collider + '.outputCollider')
+            continue
+
+        col_shape = cmds.listRelatives(col, s=True, f=True, noIntermediate=True)
 
         if col_shape:
             col_shape = col_shape[0]
@@ -215,7 +278,8 @@ def connect_colliders(bone_dynamics_node, colliders, replace=False, *args):
                 is_found = True
 
             elif col_node_type == 'mesh':
-                connector.connect_mesh('{}.worldMesh[0]'.format(col_shape))
+                mesh_collider = create_mesh_collider(col_shape)
+                connector.connect_mesh_data(mesh_collider + '.outputCollider')
                 is_found = True
 
         if is_found:

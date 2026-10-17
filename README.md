@@ -6,12 +6,13 @@
 
 > [!WARNING]
 > This plug-in uses internal-use Maya node IDs:  
-> `0x7b001`, `0x7b002`, `0x7b003`, `0x7b004`, and `0x7b009`.  
+> `0x7b001`–`0x7b006`, and `0x7b009` (including custom mesh-collider data).
 
 ## ✨ Features
 
 - Simple integration with standard Maya joints
 - Multiple collision types: sphere, capsule, infinite plane, ground, and mesh
+- Shared deforming mesh colliders with sampled motion, sphere/capsule CCD and vertex-color face exclusion
 - Dedicated collider nodes and visualizer node
 - Python helper package for scripted setup
 - Angle limits
@@ -29,7 +30,7 @@ After extracting the zip file:
 
 1. Copy the `boneDynamicsNode.mll` file for your Maya version from the `plug-ins` folder to `C:\Users\<USERNAME>\Documents\maya\<MAYAVERSION>\plug-ins`.
 2. Copy the `scripts` folder to `C:\Users\<USERNAME>\Documents\maya`.  
-   - The `scripts` folder installs the `bdn` Python helper package and `AEboneDynamicsNodeTemplate.mel`.
+   - The `scripts` folder installs the `bdn` Python helper package and both dynamics/mesh-collider AE templates.
 
 For additional instructions, refer to the [Installation](https://github.com/akasaki1211/boneDynamicsNode/wiki/Installation) wiki page.
 
@@ -101,6 +102,11 @@ cmds.setAttr("boneDynamicsNode1.simulationScale", 0.01)
 Sphere `radius` and capsule `radiusA`, `radiusB`, and `height` support animated
 viewport previews. The draw overrides read their current values on each viewport
 update, including during Evaluation Manager playback.
+
+For sampled deforming mesh collision, whole-bone capsules, thin-surface CCD,
+and vertex-color face exclusion, see [Mesh colliders](docs/mesh_colliders.md).
+`bdn.connect_colliders(node, ['meshTransform'])` creates/reuses a native shared
+`meshColliderNode`. Existing direct `meshCollider[]` inputs retain legacy behavior.
 
 Regression checks can be run with Maya's Python interpreter:
 
