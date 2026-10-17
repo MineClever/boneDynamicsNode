@@ -60,6 +60,29 @@ cmds.select(bon)
 > [!IMPORTANT]
 > The simulation advances by scene time (deltaTime), not per playback frame. "Play every frame" is still recommended for a stable real-time preview. Scrubbing backwards or large time jumps will reset the simulation to the current pose. Dynamic parameters (e.g. `damping`) are expressed per second; use `timeScale` to speed up or slow down the simulation.
 
+`timeScale` uses integration steps no longer than 1/240 second. Values above 1
+increase the number of steps without resetting the simulation or dropping scaled
+time. Computation cost grows with the multiplier; very high values may not play
+in real time. A value of 0 pauses simulation and does not accumulate elapsed time.
+The existing seek policy uses **unscaled scene time**: backwards seeks and gaps
+over 1/15 second reset the state. Use Play every frame to avoid playback skips.
+Scene inputs are sampled once per evaluation; faster motion can still exceed
+what the viewport frame rate can show.
+
+Sphere `radius` and capsule `radiusA`, `radiusB`, and `height` support animated
+viewport previews. The draw overrides read their current values on each viewport
+update, including during Evaluation Manager playback.
+
+Regression checks can be run with Maya's Python interpreter:
+
+```powershell
+& 'C:/Program Files/Autodesk/Maya2022/bin/mayapy.exe' tests/maya_regression.py "$PWD/build/win64_2022/Release/boneDynamicsNode.mll"
+```
+
+Run `sample_scripts/animated_colliders.py` in interactive Maya to verify the
+animated wireframes during playback and scrubbing. Batch checks validate solver
+results and animated bounding boxes; they do not render the viewport.
+
 Refer to [Quick Start](https://github.com/akasaki1211/boneDynamicsNode/wiki/Quick-Start) and [Basic Usage](https://github.com/akasaki1211/boneDynamicsNode/wiki/Basic-Usage) for details.
 
 ## 📖 Documentation

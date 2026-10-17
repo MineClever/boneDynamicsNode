@@ -34,9 +34,9 @@ MBoundingBox sphereColliderNode::boundingBox() const
 
 MStatus sphereColliderNode::setDependentsDirty(const MPlug& plug, MPlugArray& plugArray)
 {
-    if (plug == s_radius)
+    if (plug == s_radius || plug == s_segments)
     {
-        MHWRender::MRenderer::setGeometryDrawDirty(thisMObject(), false);
+        MHWRender::MRenderer::setGeometryDrawDirty(thisMObject(), true);
     }
 
     return MS::kSuccess;
@@ -72,7 +72,8 @@ MStatus sphereColliderNode::initialize()
 }
 
 
-sphereColliderDrawOverride::sphereColliderDrawOverride(const MObject& obj) : MHWRender::MPxDrawOverride(obj, nullptr, false) {}
+// Read animated inputs on every viewport update, including Evaluation Manager playback.
+sphereColliderDrawOverride::sphereColliderDrawOverride(const MObject& obj) : MHWRender::MPxDrawOverride(obj, nullptr, true) {}
 sphereColliderDrawOverride::~sphereColliderDrawOverride() {}
 
 MHWRender::MPxDrawOverride* sphereColliderDrawOverride::creator(const MObject& obj)

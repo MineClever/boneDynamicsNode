@@ -41,10 +41,11 @@ MStatus capsuleColliderNode::setDependentsDirty(const MPlug& plug, MPlugArray& p
     if (
         plug == s_radiusA ||
         plug == s_radiusB ||
-        plug == s_height
+        plug == s_height ||
+        plug == s_segments
     )
     {
-        MHWRender::MRenderer::setGeometryDrawDirty(thisMObject(), false);
+        MHWRender::MRenderer::setGeometryDrawDirty(thisMObject(), true);
     }
 
     return MS::kSuccess;
@@ -93,7 +94,8 @@ MStatus capsuleColliderNode::initialize()
     return MS::kSuccess;
 }
 
-capsuleColliderDrawOverride::capsuleColliderDrawOverride(const MObject& obj) : MHWRender::MPxDrawOverride(obj, nullptr, false) {}
+// Read animated inputs on every viewport update, including Evaluation Manager playback.
+capsuleColliderDrawOverride::capsuleColliderDrawOverride(const MObject& obj) : MHWRender::MPxDrawOverride(obj, nullptr, true) {}
 capsuleColliderDrawOverride::~capsuleColliderDrawOverride() {}
 
 MHWRender::MPxDrawOverride* capsuleColliderDrawOverride::creator(const MObject& obj)

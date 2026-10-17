@@ -13,6 +13,7 @@
 #include <maya/MTime.h>
 #include <maya/MPoint.h>
 #include <maya/MTransformationMatrix.h>
+#include <maya/MGlobal.h>
 
 #include <limits>    // std::numeric_limits
 #include <algorithm> // std::max, std::min
@@ -25,8 +26,7 @@ namespace
 
     // deltaTime sub-stepping (fixed internal defaults, not exposed)
     constexpr double kSubStepDt = 1.0 / 240.0;              // fixed substep duration in seconds
-    constexpr int kMaxSubSteps = 16;                        // max catch-up substeps per evaluation (~66.7 ms, covers 15 fps and above)
-    constexpr double kMaxCatchUpSec = kSubStepDt * kMaxSubSteps; // max catch-up duration in seconds
+    constexpr double kMaxSceneGapSec = 16.0 * kSubStepDt;   // reset only for scene-time jumps, independent of timeScale
     constexpr double kRefFps = 30.0;                        // reference fps for turbulence scaling
 
     void angleLimit(const MVector& pivot, const MVector& a, MVector& b, const double limitAngle)
@@ -931,10 +931,19 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 
     // delta time (seconds) from scene time, scaled by the user multiplier
     const double timeScale = data.inputValue(s_timeScale).asDouble();
-    const double dtTotal = (time - m_prevTime).as(MTime::kSeconds) * timeScale;
+    const double sceneDt = (time - m_prevTime).as(MTime::kSeconds);
+    const double dtTotal = sceneDt * timeScale;
 
-    // backward jump (scrub left) or gap beyond the catch-up cap: reset to the current pose
-    if (!m_hasPrevTime || time < m_prevTime || dtTotal > kMaxCatchUpSec) {
+    // Reject invalid numeric input before changing persistent simulation state.
+    const double subStepCount = std::ceil(dtTotal / kSubStepDt);
+    if (!std::isfinite(timeScale) || timeScale < 0.0 || !std::isfinite(subStepCount) ||
+        subStepCount >= static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
+        MGlobal::displayError("boneDynamicsNode: timeScale exceeds the representable simulation range.");
+        return MS::kInvalidParameter;
+    }
+
+    // Preserve the scene-time seek policy without treating accelerated playback as a seek.
+    if (!m_hasPrevTime || time < m_prevTime || sceneDt > kMaxSceneGapSec) {
         resetSimulation();
         outputInitialRotation();
         CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
@@ -955,15 +964,17 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 
     // same-frame re-evaluation: keep the simulation state, just refresh the output
     if (dtTotal <= 0.0) {
+        // A paused timeScale consumes scene time so resuming cannot accumulate a gap.
+        m_prevTime = time;
+        m_prevOffsetMatrix = initialPose.offsetMatrix;
         outputRotationFromPosition(m_position);
         CHECK_MSTATUS_AND_RETURN_IT(data.setClean(plug));
 
         return MS::kSuccess;
     }
 
-    // sub-steps (fixed-step catch-up, capped for stability)
-    int numSubSteps = static_cast<int>(std::ceil(dtTotal / kSubStepDt));
-    numSubSteps = std::max(1, std::min(numSubSteps, kMaxSubSteps));
+    // Cover the full scaled duration; never enlarge the integration step or discard time.
+    const std::uint64_t numSubSteps = static_cast<std::uint64_t>(std::max(1.0, subStepCount));
     const double subDt = dtTotal / numSubSteps;
     const double dt2 = subDt * subDt;
 
@@ -1095,12 +1106,12 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         }
     }
 
-    for (int step = 0; step < numSubSteps; ++step)
-    {
-        // position offset
-        const MPoint offsetedPosition = MPoint(m_position) * m_prevOffsetMatrix.inverse() * initialPose.offsetMatrix;
-        m_position = MVector(offsetedPosition) * initialPose.offsetMatrixWeight + m_position * (1.0 - initialPose.offsetMatrixWeight);
+    // The offset is a scene-frame displacement, applied once regardless of substep count.
+    const MPoint offsetedPosition = MPoint(m_position) * m_prevOffsetMatrix.inverse() * initialPose.offsetMatrix;
+    m_position = MVector(offsetedPosition) * initialPose.offsetMatrixWeight + m_position * (1.0 - initialPose.offsetMatrixWeight);
 
+    for (std::uint64_t step = 0; step < numSubSteps; ++step)
+    {
         // velocity damping (per-second exponential decay)
         m_velocity *= std::exp(-dynamicsParams.damping * subDt);
 
