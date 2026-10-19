@@ -369,6 +369,10 @@ if "%~1"=="2022" (
     set "MSVC=v142"
     set "CXX_STANDARD_VER=17"
 )
+if "%~1"=="2020" (
+    set "MSVC=v142"
+    set "CXX_STANDARD_VER=17"
+)
 if "%~1"=="2019" (
     set "MSVC=v142"
     set "CXX_STANDARD_VER=17"

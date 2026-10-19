@@ -502,3 +502,4 @@ vcpkg_installed/
 Testing/
 .cache/
 .vscode/settings.json
+make_build_local.bat
