@@ -345,7 +345,7 @@ exit /b !BUILD_FAILED!
 set "MSVC="
 set "CXX_STANDARD_VER="
 
-if "%~1"=="2027" (
+iif "%~1"=="2027" (
     set "MSVC=v143"
     set "CXX_STANDARD_VER=20"
 )
@@ -369,14 +369,24 @@ if "%~1"=="2022" (
     set "MSVC=v142"
     set "CXX_STANDARD_VER=17"
 )
-if "%~1"=="2020" (
-    set "MSVC=v142"
-    set "CXX_STANDARD_VER=17"
-)
 if "%~1"=="2019" (
     set "MSVC=v142"
     set "CXX_STANDARD_VER=17"
 )
+
+if "%~1"=="2021" (
+    set "MSVC=v142"
+    set "CXX_STANDARD_VER=17"
+)
+if "%~1"=="2020" (
+    set "MSVC=v142"
+    set "CXX_STANDARD_VER=17"
+)
+if "%~1"=="2018" (
+    set "MSVC=v141"
+    set "CXX_STANDARD_VER=14"
+)
+
 
 if not defined MSVC exit /b 1
 exit /b 0
