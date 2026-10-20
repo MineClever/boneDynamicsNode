@@ -15,7 +15,7 @@ maya.standalone.initialize(name="python")
 from maya import cmds
 
 
-def capture(with_mesh=False):
+def capture(with_mesh=False, reverse=False):
     result = []
     for elastic in (0, 1, 2):
         for damping, stiffness in ((0.1, 0), (0.5, 0.1), (1, 1)):
@@ -47,7 +47,8 @@ def capture(with_mesh=False):
                     cmds.connectAttr("time1.outTime", provider + ".time")
                     cmds.connectAttr(provider + ".outputCollider", node + ".meshColliderData[0]")
                 rows = []
-                for frame in range(100, 113):
+                frames = range(112, 99, -1) if reverse else range(100, 113)
+                for frame in frames:
                     cmds.setAttr(parent + ".rotateY", (frame - 100) * 2)
                     cmds.setAttr(offset + ".translateY", (frame - 100) * 0.2)
                     cmds.currentTime(frame)
@@ -59,8 +60,10 @@ def capture(with_mesh=False):
 if __name__ == "__main__":
     try:
         cmds.loadPlugin(os.path.abspath(sys.argv[1]))
-        actual = capture()
-        fixture = os.path.join(os.path.dirname(__file__), "dev_solver_baseline.json")
+        reverse = "--reverse" in sys.argv
+        actual = capture(reverse=reverse)
+        fixture = os.path.join(os.path.dirname(__file__),
+                               "dev_solver_reverse_baseline.json" if reverse else "dev_solver_baseline.json")
         if "--capture" in sys.argv:
             with open(fixture, "w") as stream:
                 json.dump(actual, stream, indent=2)
@@ -72,7 +75,7 @@ if __name__ == "__main__":
             error = max(abs(a - b) for aa, bb in zip(actual, expected)
                         for row_a, row_b in zip(aa, bb) for a, b in zip(row_a, row_b))
             assert not math.isnan(error) and not math.isinf(error) and error < 1e-7, error
-            distant = capture(with_mesh=True)
+            distant = capture(with_mesh=True, reverse=reverse)
             mesh_error = max(abs(a - b) for aa, bb in zip(distant, expected)
                              for row_a, row_b in zip(aa, bb) for a, b in zip(row_a, row_b))
             assert not math.isnan(mesh_error) and not math.isinf(mesh_error) and mesh_error < 1e-7, mesh_error

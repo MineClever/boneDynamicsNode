@@ -129,7 +129,7 @@ MStatus meshColliderNode::compute(const MPlug& plug, MDataBlock& data)
         timeline->rootOverlapFallback != m_published->rootOverlapFallback;
     timeline->policyRevision = m_policyRevision + (policyChanged ? 1 : 0);
     const bool advancing = normalContext && m_hasPrevious && source == m_previousSource &&
-                           now > m_previousSeconds && now - m_previousSeconds <= 1.0 / 15.0;
+                           now != m_previousSeconds && std::abs(now - m_previousSeconds) <= 1.0 / 15.0;
     int sampleCount = 1;
     const bool repeat = normalContext && m_hasPrevious && now == m_previousSeconds &&
                         source == m_previousSource && current == m_previous && m_published && samples == m_previousSamples;

@@ -129,6 +129,50 @@ def simulate_geometry(world_scale=1.0, simulation_scale=None, collision=None,
 
 
 class DynamicsRegression(unittest.TestCase):
+    def test_reverse_and_direction_changes_keep_integrating(self):
+        for mode in ("off", "serial", "parallel"):
+            for scale in (0.1, 1, 3.5):
+                expected = simulate(scale, 6, mode=mode)
+                for frames in ((20, 19, 18, 17, 16, 15, 14),
+                               (20, 21, 22, 21, 20, 21, 20)):
+                    cmds.file(new=True, force=True)
+                    cmds.currentUnit(time="ntsc")
+                    cmds.evaluationManager(mode=mode)
+                    node, target = make_solver(scale)
+                    actual = []
+                    for frame in frames:
+                        cmds.currentTime(frame)
+                        actual.append(cmds.getAttr(target + ".rotate")[0])
+                    self.assert_samples_equal(actual, expected)
+
+    def test_large_jumps_reset_in_both_directions(self):
+        for destination in (10, 30):
+            cmds.file(new=True, force=True)
+            cmds.currentUnit(time="ntsc")
+            node, target = make_solver(1)
+            for frame in (20, 21):
+                cmds.currentTime(frame)
+                previous = cmds.getAttr(target + ".rotate")[0]
+            self.assertGreater(abs(previous[2]), 0.01)
+            cmds.currentTime(destination)
+            self.assertEqual(cmds.getAttr(target + ".rotate")[0], (0, 0, 0))
+
+    def test_pause_and_resume_reverse_playback(self):
+        expected = simulate(1, 2)[-1]
+        cmds.file(new=True, force=True)
+        cmds.currentUnit(time="ntsc")
+        node, target = make_solver(1)
+        for frame in (30, 29):
+            cmds.currentTime(frame)
+            paused = cmds.getAttr(target + ".rotate")[0]
+        cmds.setAttr(node + ".timeScale", 0)
+        for frame in range(28, 19, -1):
+            cmds.currentTime(frame)
+            self.assert_samples_equal(cmds.getAttr(target + ".rotate"), [paused])
+        cmds.setAttr(node + ".timeScale", 1)
+        cmds.currentTime(19)
+        self.assert_samples_equal(cmds.getAttr(target + ".rotate"), [expected])
+
     def assert_samples_equal(self, actual, expected, tolerance=1e-6):
         for row_a, row_b in zip(actual, expected):
             for a, b in zip(row_a, row_b):

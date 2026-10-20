@@ -358,16 +358,23 @@ Result solve(const Timeline& collider, const Sweep& motion, double begin, double
 {
     Result result;
     const double length = (motion.tip1 - motion.root1).length();
+    // Map directed scene times to increasing playback coordinates. Geometry
+    // stays in evaluation order, including when the scene frames decrease.
+    const double direction = end < begin ? -1.0 : 1.0;
+    begin *= direction;
+    end *= direction;
     for (const auto& interval : collider.segments) {
+        const double intervalBegin = interval.begin * direction;
+        const double intervalEnd = interval.end * direction;
         // A newly connected fallback provider has only the current snapshot.
         // Resolve against that surface immediately; no prior mesh motion is known.
-        const bool instantFallback = collider.rootOverlapFallback && !motion.capsule && interval.begin == interval.end;
-        const double start = instantFallback ? begin : std::max(begin, interval.begin);
-        const double finish = instantFallback ? end : std::min(end, interval.end);
+        const bool instantFallback = collider.rootOverlapFallback && !motion.capsule && intervalBegin == intervalEnd;
+        const double start = instantFallback ? begin : std::max(begin, intervalBegin);
+        const double finish = instantFallback ? end : std::min(end, intervalEnd);
         if (finish < start || (finish == start && end > begin)) continue;
-        const double intervalDuration = interval.end - interval.begin;
-        const double ta = intervalDuration > 0 ? clamp((start - interval.begin) / intervalDuration) : 1;
-        const double tb = intervalDuration > 0 ? clamp((finish - interval.begin) / intervalDuration) : 1;
+        const double intervalDuration = intervalEnd - intervalBegin;
+        const double ta = intervalDuration > 0 ? clamp((start - intervalBegin) / intervalDuration) : 1;
+        const double tb = intervalDuration > 0 ? clamp((finish - intervalBegin) / intervalDuration) : 1;
         const double fa = end > begin ? clamp((start - begin) / (end - begin)) : 1;
         const double fb = end > begin ? clamp((finish - begin) / (end - begin)) : 1;
         Sweep sweep = motion;
@@ -403,7 +410,7 @@ Result solve(const Timeline& collider, const Sweep& motion, double begin, double
             const auto bary = barycentric(hit.contact.meshPoint, triHit);
             // Carry the contact to the end of the full bone substep. A moving
             // surface must push the bone, rather than merely stopping it at TOI.
-            const double endT = intervalDuration > 0 ? clamp((end - interval.begin) / intervalDuration) : 1;
+            const double endT = intervalDuration > 0 ? clamp((end - intervalBegin) / intervalDuration) : 1;
             const auto triEnd = triangleAt(interval, index, endT);
             MVector surfacePoint;
             for (int j = 0; j < 3; ++j) surfacePoint += triEnd[j] * bary[j];
@@ -421,14 +428,21 @@ Result solve(const Timeline& collider, const Sweep& motion, double begin, double
 bool rootOverlaps(const Timeline& collider, const Sweep& motion, double begin, double end, double padding)
 {
     const double radius = std::max(0.0, motion.rootRadius + collider.contactOffset + padding);
+    // Map directed scene times to increasing playback coordinates. Geometry
+    // stays in evaluation order, including when the scene frames decrease.
+    const double direction = end < begin ? -1.0 : 1.0;
+    begin *= direction;
+    end *= direction;
     for (const auto& interval : collider.segments) {
-        const bool instant = interval.begin == interval.end;
-        const double start = instant ? begin : std::max(begin, interval.begin);
-        const double finish = instant ? end : std::min(end, interval.end);
+        const double intervalBegin = interval.begin * direction;
+        const double intervalEnd = interval.end * direction;
+        const bool instant = intervalBegin == intervalEnd;
+        const double start = instant ? begin : std::max(begin, intervalBegin);
+        const double finish = instant ? end : std::min(end, intervalEnd);
         if (finish < start || (finish == start && end > begin)) continue;
-        const double duration = interval.end - interval.begin;
-        const double ta = duration > 0 ? clamp((start - interval.begin) / duration) : 1;
-        const double tb = duration > 0 ? clamp((finish - interval.begin) / duration) : 1;
+        const double duration = intervalEnd - intervalBegin;
+        const double ta = duration > 0 ? clamp((start - intervalBegin) / duration) : 1;
+        const double tb = duration > 0 ? clamp((finish - intervalBegin) / duration) : 1;
         const double fa = end > begin ? clamp((start - begin) / (end - begin)) : 1;
         const double fb = end > begin ? clamp((finish - begin) / (end - begin)) : 1;
         Sweep root;
@@ -458,9 +472,10 @@ bool penetrating(const Timeline& collider, const Sweep& motion, double seconds, 
 {
     const double tolerance = std::max(1e-8, (tip - motion.root1).length() * 1e-8);
     for (const auto& interval : collider.segments) {
-        if (seconds < interval.begin - 1e-10 || seconds > interval.end + 1e-10) continue;
+        if (seconds < std::min(interval.begin, interval.end) - 1e-10 ||
+            seconds > std::max(interval.begin, interval.end) + 1e-10) continue;
         const double duration = interval.end - interval.begin;
-        const double t = duration > 0 ? clamp((seconds - interval.begin) / duration) : 1;
+        const double t = duration != 0 ? clamp((seconds - interval.begin) / duration) : 1;
         if (!motion.capsule && interval.a == interval.b) {
             MVector q, normal; unsigned int index;
             if (interval.b->closest(tip, q, normal, index))

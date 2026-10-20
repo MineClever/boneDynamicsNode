@@ -80,8 +80,13 @@ Values of `timeScale` above 1 divide the full scaled duration into steps no long
 than one scene frame, without resetting the
 simulation or dropping scaled time. Computation cost grows with the multiplier; very high values may not play
 in real time. A value of 0 pauses simulation and does not accumulate elapsed time.
-The existing seek policy uses **unscaled scene time**: backwards seeks and gaps
-over 1/15 second reset the state. Use Play every frame to avoid playback skips.
+Forward and reverse playback both advance dynamics with positive elapsed time;
+reversing playback direction preserves the current position and velocity. Mesh
+CCD follows the animation sampling direction. This simulates while playing
+backwards; it does not reconstruct a previously computed trajectory.
+The seek policy uses **unscaled scene time**: gaps larger than 1/15 second in
+either direction reset the state. Frames at or before `resetTime` still reset,
+as in dev. Use Play every frame to avoid playback skips.
 Scene inputs are sampled once per evaluation; faster motion can still exceed
 what the viewport frame rate can show.
 

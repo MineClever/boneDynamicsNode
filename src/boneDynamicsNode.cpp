@@ -1075,7 +1075,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     // delta time (seconds) from scene time, scaled by the user multiplier
     const double timeScale = data.inputValue(s_timeScale).asDouble();
     const double sceneDt = (time - m_prevTime).as(MTime::kSeconds);
-    const double dtTotal = sceneDt * timeScale;
+    const double dtTotal = std::abs(sceneDt) * timeScale;
 
     // Reject invalid numeric input before changing persistent simulation state.
     const double subStepCount = roundedUpStepCount(dtTotal, frameSeconds);
@@ -1085,8 +1085,9 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         return MS::kInvalidParameter;
     }
 
-    // Preserve the scene-time seek policy without treating accelerated playback as a seek.
-    if (!m_hasPrevTime || time < m_prevTime || sceneDt > kMaxSceneGapSec) {
+    // Playback in either direction advances dynamics with positive elapsed time.
+    // Only large scene-time jumps reset; reversing direction preserves velocity.
+    if (!m_hasPrevTime || std::abs(sceneDt) > kMaxSceneGapSec) {
         resetSimulation();
         outputInitialRotation();
         CHECK_MSTATUS_AND_RETURN_IT(cleanOutputs());
@@ -1444,7 +1445,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         MVector correctedTip = meshTip0;
         MVector previousPredictedTip = meshTip0;
         const std::uint64_t collisionSteps = sampledMeshes.empty() ? 0 :
-            static_cast<std::uint64_t>(std::max(1.0, roundedUpStepCount(sceneDt / numSubSteps, 1.0 / 240.0)));
+            static_cast<std::uint64_t>(std::max(1.0, roundedUpStepCount(std::abs(sceneDt) / numSubSteps, 1.0 / 240.0)));
         for (std::uint64_t collisionStep = 0; collisionStep < collisionSteps; ++collisionStep) {
             const double fraction0 = static_cast<double>(collisionStep) / collisionSteps;
             const double fraction1 = static_cast<double>(collisionStep + 1) / collisionSteps;

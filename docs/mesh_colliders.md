@@ -76,7 +76,7 @@ The effective mode is selected once per substep and reused by every `solve` and
 substeps.
 
 Hysteresis belongs to each solver, keyed by live provider identity and policy
-revision. Reset/backward/gap/FPS/simulationScale changes clear it; radius changes,
+revision. Reset/large-gap/FPS/simulationScale changes clear it; radius changes,
 provider policy/source edits, topology loss and disconnection/reconnection
 invalidate affected history. `boneAsCapsule=False` and disabled simulation clear
 the relevant state. Non-normal DG context queries use temporary simulation and
@@ -117,8 +117,11 @@ disabled for this stateful provider.
 `simulationScale` applies to integration state; mesh queries and `contactOffset`
 use world-space distances. Input/output conversion keeps collision geometry
 consistent. `timeScale` changes simulated duration and substep count, while mesh
-animation continues to follow actual scene time. Backwards seeks and scene gaps
-over 1/15 second reset motion history, matching the existing solver's seek policy.
+animation continues to follow actual scene time in either playback direction.
+Scene gaps over 1/15 second in either direction reset motion history, matching
+the solver's seek policy. Consecutive reverse frames and direction changes retain
+simulation state. Mesh sample intervals follow evaluation order, so CCD and root
+overlap checks trace the surface in the actual playback direction.
 At normal speed dynamics uses one step per scene frame, retaining dev's damping,
 stiffness and force definitions. CCD separately subdivides the predicted motion
 into intervals no longer than 1/240 second. These collision intervals do not

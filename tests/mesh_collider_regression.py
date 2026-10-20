@@ -61,6 +61,36 @@ def connect(node, mesh, **settings):
 
 
 class MeshColliderRegression(unittest.TestCase):
+    def test_reverse_moving_mesh_and_shared_provider(self):
+        for mode in ('off', 'serial', 'parallel'):
+            self.setUp()
+            cmds.evaluationManager(mode=mode)
+            mesh = plane(-2)
+            for frame, value in ((10, 4), (11, -2)):
+                cmds.setKeyframe(mesh, attribute='translateY', time=frame, value=value)
+            cmds.keyTangent(mesh, attribute='translateY', inTangentType='linear', outTangentType='linear')
+            node, end = bone()
+            provider = connect(node, mesh)
+            other, other_end = bone()
+            cmds.connectAttr(provider + '.outputCollider', other + '.meshColliderData[0]')
+            for tip in (end, other_end):
+                evaluate(tip, 11)
+            for tip in (other_end, end):
+                self.assertGreaterEqual(evaluate(tip, 10)[1], 4.099)
+            self.assertEqual(cmds.getAttr(provider + '.sampleCount'), 5)
+            self.assertEqual(cmds.currentTime(query=True), 10)
+
+    def test_reverse_subframe_out_and_back_motion(self):
+        mesh = plane(-2)
+        for frame, value in ((10, -2), (10.5, 4), (11, -2)):
+            cmds.setKeyframe(mesh, attribute='translateY', time=frame, value=value)
+        cmds.keyTangent(mesh, attribute='translateY', inTangentType='linear', outTangentType='linear')
+        node, end = bone()
+        provider = connect(node, mesh)
+        evaluate(end, 11)
+        self.assertGreater(evaluate(end, 10)[1], 4)
+        self.assertEqual(cmds.getAttr(provider + '.sampleCount'), 5)
+
     def setUp(self):
         cmds.file(new=True, force=True)
         cmds.currentUnit(time='ntsc', linear='cm')

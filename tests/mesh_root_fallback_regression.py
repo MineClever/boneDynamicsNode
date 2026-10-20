@@ -70,6 +70,17 @@ class RootFallbackRegression(unittest.TestCase):
                 self.check_tip(evaluate(end, 1))
                 self.assertTrue(cmds.getAttr(node + '.meshRootFallbackActive'))
 
+    def test_reverse_playback_keeps_root_fallback(self):
+        for mode in ('off', 'serial', 'parallel'):
+            self.setUp()
+            cmds.evaluationManager(mode=mode)
+            node, end, provider = self.fixture()
+            evaluate(end, 12)
+            for frame in (11, 10, 11, 10):
+                self.check_tip(evaluate(end, frame))
+                self.assertTrue(cmds.getAttr(node + '.meshRootFallbackActive'))
+                self.assertEqual(cmds.getAttr(provider + '.sampleCount'), 5)
+
     def test_python_compatibility_reuse_and_cache(self):
         mesh = plane()
         legacy = bdn.create_mesh_collider(mesh, 'bdnCollisionExclude', 4, .001, True, True, None)

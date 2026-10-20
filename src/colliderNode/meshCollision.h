@@ -54,6 +54,7 @@ namespace meshCollision
 
     struct Segment
     {
+        // Scene times follow evaluation order; end may be less than begin.
         double begin = 0, end = 0;
         std::shared_ptr<const Snapshot> a, b;
         std::shared_ptr<const TriangleTree> tree;
