@@ -173,6 +173,7 @@ class DynamicsRegression(unittest.TestCase):
         target = cmds.listConnections(node + ".outputRotate", destination=True)[0]
         self.assertEqual(cmds.attributeQuery("simulationScale", node=node, listDefault=True), [1])
         # A same-frame scale change invalidates the output and clears old state.
+        cmds.setAttr(node + ".enableTurbulence", False)
         cmds.setAttr(node + ".simulationScale", 0.01)
         self.assertEqual(cmds.getAttr(target + ".rotate")[0], (0, 0, 0))
         cmds.currentTime(13)
@@ -182,23 +183,20 @@ class DynamicsRegression(unittest.TestCase):
         cmds.currentTime(1)
         self.assert_samples_equal([actual], cmds.getAttr(target + ".rotate"))
 
-    def test_frame_rate_step_selection_preserves_real_time(self):
-        # A full frame must match N frames at 1/N speed with static inputs.
-        # Turbulence also detects an incorrect number of internal RNG updates.
-        for mode in ("off", "serial", "parallel"):
-            for unit, steps in (("film", 10), ("pal", 12), ("120fps", 2),
-                                ("ntsc", 8), ("show", 5), ("palf", 6),
-                                ("ntscf", 4), ("100fps", 3),
-                                ("23.976fps", 10), ("29.97fps", 8),
-                                ("47.952fps", 5), ("59.94fps", 4),
-                                ("75fps", 4), ("90fps", 3), ("125fps", 2)):
-                with self.subTest(mode=mode, unit=unit):
-                    actual = simulate(1, 1, mode, unit, True)[-1]
-                    expected = simulate(1.0 / steps, steps, mode, unit, True)[-1]
-                    self.assertGreater(max(abs(v) for v in actual), 1e-8)
-                    for a, b in zip(actual, expected):
-                        self.assertAlmostEqual(a, b, delta=1e-7,
-                                               msg=(mode, unit, actual, expected))
+    def test_frame_duration_scales_gravity(self):
+        # One step at different scene rates retains the actual elapsed duration.
+        for unit, fps in (("film", 24), ("pal", 25), ("ntsc", 30), ("120fps", 120)):
+            actual = simulate(1, 1, unit=unit)[-1]
+            expected_angle = math.degrees(math.atan2(-980.0 / (fps * fps), 10.0))
+            self.assertAlmostEqual(actual[2], expected_angle, delta=1e-7)
+
+    def test_legacy_parameter_defaults_and_ranges(self):
+        cmds.file(new=True, force=True)
+        node, target = make_solver(1)
+        self.assertEqual(cmds.getAttr(node + ".damping"), 0.1)
+        for attr in ("damping", "stiffness"):
+            self.assertEqual(cmds.attributeQuery(attr, node=node, minimum=True), [0])
+            self.assertEqual(cmds.attributeQuery(attr, node=node, maximum=True), [1])
 
     def test_changing_frame_rate_resets_state(self):
         for mode in ("off", "serial", "parallel"):
@@ -222,26 +220,16 @@ class DynamicsRegression(unittest.TestCase):
             for a, b in zip(actual, expected):
                 self.assertAlmostEqual(a, b, delta=1e-7)
 
-    def test_step_selection_at_large_scene_times(self):
-        for unit, steps in (("film", 10), ("pal", 12), ("120fps", 2),
-                            ("23.976fps", 10), ("29.97fps", 8)):
-            with self.subTest(unit=unit):
-                actual = simulate(1, 1, unit=unit, turbulence=True,
-                                  start_frame=10000)[-1]
-                expected = simulate(1.0 / steps, steps, unit=unit,
-                                    turbulence=True, start_frame=10000)[-1]
-                for a, b in zip(actual, expected):
-                    self.assertAlmostEqual(a, b, delta=1e-7)
-
     def test_acceleration_integrates_the_full_duration(self):
         for mode in ("off", "serial", "parallel"):
             for scale in (2, 3.5, 10, 100):
                 # Compare equal simulation durations with identical static inputs.
                 accelerated = simulate(scale, 2, mode)[-1]
-                reference = simulate(1, int(scale * 2), mode)[-1]
+                steps = int(math.ceil(scale))
+                reference = simulate(scale / steps, steps * 2, mode)[-1]
                 self.assertGreater(max(abs(v) for v in accelerated), 0.001)
                 for actual, expected in zip(accelerated, reference):
-                    self.assertAlmostEqual(actual, expected, delta=0.15,
+                    self.assertAlmostEqual(actual, expected, delta=1e-7,
                                            msg=(mode, scale, accelerated, reference))
 
     def test_small_and_large_scales_remain_finite(self):
@@ -276,7 +264,7 @@ class DynamicsRegression(unittest.TestCase):
             node, target = make_solver(scale)
             cmds.setAttr(node + ".gravityMultiply", 0)
             cmds.setAttr(node + ".elasticity", 0)
-            cmds.setAttr(node + ".damping", 1e9)
+            cmds.setAttr(node + ".damping", 1)
             cmds.currentTime(0)
             cmds.getAttr(target + ".rotate")
             cmds.setAttr(node + ".offsetMatrix",

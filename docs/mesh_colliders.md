@@ -119,6 +119,11 @@ use world-space distances. Input/output conversion keeps collision geometry
 consistent. `timeScale` changes simulated duration and substep count, while mesh
 animation continues to follow actual scene time. Backwards seeks and scene gaps
 over 1/15 second reset motion history, matching the existing solver's seek policy.
+At normal speed dynamics uses one step per scene frame, retaining dev's damping,
+stiffness and force definitions. CCD separately subdivides the predicted motion
+into intervals no longer than 1/240 second. These collision intervals do not
+apply damping, stiffness, forces or turbulence again; they carry contact
+corrections forward along the predicted path.
 
 ## Excluding faces with vertex colors
 

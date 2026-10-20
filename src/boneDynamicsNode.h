@@ -175,7 +175,7 @@ private:
 
     // turbulence state
     int m_lastSeed;
-    int m_turbStep;                     // cumulative substep index for reproducible turbulence
+    int m_lastFrame;                    // scene-frame seed, matching dev turbulence
     std::uint32_t m_rngState[4];
     MVector m_turbulenceVector;       // turbulence vector
     MVector m_turbulenceVectorChange; // vector that changes the turbulenceVector

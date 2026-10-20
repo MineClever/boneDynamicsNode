@@ -18,7 +18,7 @@
 
 #include <limits>    // std::numeric_limits
 #include <algorithm> // std::max, std::min
-#include <cmath>     // std::exp, std::ceil
+#include <cmath>     // std::ceil
 #include <vector>    // std::vector
 #include <functional>
 
@@ -28,8 +28,6 @@ namespace
 
     // Keep scene-time seek detection independent of the integration frequency.
     constexpr double kMaxSceneGapSec = 1.0 / 15.0;
-    constexpr double kRefFps = 30.0;                        // reference fps for turbulence scaling
-
     MMatrix scaleMatrixTranslation(MMatrix matrix, double scale)
     {
         // Conjugate an affine transform into uniformly scaled coordinates:
@@ -38,22 +36,6 @@ namespace
             matrix[3][axis] *= scale;
         }
         return matrix;
-    }
-
-    double integrationStepSeconds(double frameSeconds)
-    {
-        const double roundedFps = std::round(1.0 / frameSeconds);
-        if (roundedFps >= 1.0) {
-            // Prefer 240 when both rates divide evenly. Round only for choosing
-            // the frame's base step count; retain the real frame duration.
-            if (std::fmod(240.0, roundedFps) == 0.0) {
-                return frameSeconds / (240.0 / roundedFps);
-            }
-            if (std::fmod(300.0, roundedFps) == 0.0) {
-                return frameSeconds / (300.0 / roundedFps);
-            }
-        }
-        return 1.0 / 240.0;
     }
 
     double roundedUpStepCount(double duration, double stepSeconds)
@@ -377,7 +359,7 @@ MObject boneDynamicsNode::s_meshRootFallbackActive;
 
 MObject boneDynamicsNode::s_outputRotate;
 
-boneDynamicsNode::boneDynamicsNode() : m_isSimulationInitialized(false), m_hasPrevTime(false), m_prevFrameSeconds(0.0), m_prevSimulationScale(1.0), m_lastSeed(-1), m_turbStep(0) {
+boneDynamicsNode::boneDynamicsNode() : m_isSimulationInitialized(false), m_hasPrevTime(false), m_prevFrameSeconds(0.0), m_prevSimulationScale(1.0), m_lastSeed(-1), m_lastFrame(-1) {
     m_rngState[0] = 0;
     m_rngState[1] = 0;
     m_rngState[2] = 0;
@@ -511,9 +493,10 @@ MStatus boneDynamicsNode::initialize()
     nAttr.setKeyable(true);
 
     // dynamics attributes
-    s_damping = nAttr.create("damping", "damp", MFnNumericData::kDouble, 3.0); // per-second velocity decay rate (1/s)
+    s_damping = nAttr.create("damping", "damp", MFnNumericData::kDouble, 0.1); // dev: fraction of velocity removed per step
     nAttr.setKeyable(true);
     nAttr.setMin(0);
+    nAttr.setMax(1);
 
     s_elasticity = nAttr.create("elasticity", "elas", MFnNumericData::kDouble, 30.0);
     nAttr.setKeyable(true);
@@ -945,14 +928,14 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             previousTime = m_prevTime, hasTime = m_hasPrevTime, frame = m_prevFrameSeconds,
             scale = m_prevSimulationScale, offset = m_prevOffsetMatrix, position = m_position,
             velocity = m_velocity, root = m_prevMeshRoot, end = m_prevMeshRestEnd,
-            seed = m_lastSeed, step = m_turbStep,
+            seed = m_lastSeed, turbulenceFrame = m_lastFrame,
             rng = std::array<std::uint32_t, 4>{{m_rngState[0], m_rngState[1], m_rngState[2], m_rngState[3]}},
             turbulence = m_turbulenceVector, change = m_turbulenceVectorChange,
             fallback = m_rootFallbackStates]() {
             m_isSimulationInitialized = initialized; m_prevTime = previousTime; m_hasPrevTime = hasTime;
             m_prevFrameSeconds = frame; m_prevSimulationScale = scale; m_prevOffsetMatrix = offset;
             m_position = position; m_velocity = velocity; m_prevMeshRoot = root; m_prevMeshRestEnd = end;
-            m_lastSeed = seed; m_turbStep = step;
+            m_lastSeed = seed; m_lastFrame = turbulenceFrame;
             std::copy(rng.begin(), rng.end(), m_rngState);
             m_turbulenceVector = turbulence; m_turbulenceVectorChange = change;
             m_rootFallbackStates = fallback;
@@ -1058,7 +1041,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         m_prevSimulationScale = simulationScale;
         m_prevMeshRoot = initialPose.boneWorldTranslate;
         m_prevMeshRestEnd = initialPose.endWorldTranslate;
-        m_turbStep = 0;
+        m_lastFrame = -1;
 
         if (dynamicsParams.enableTurbulence) {
             m_turbulenceVector = MVector();
@@ -1095,7 +1078,7 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
     const double dtTotal = sceneDt * timeScale;
 
     // Reject invalid numeric input before changing persistent simulation state.
-    const double subStepCount = roundedUpStepCount(dtTotal, integrationStepSeconds(frameSeconds));
+    const double subStepCount = roundedUpStepCount(dtTotal, frameSeconds);
     if (!std::isfinite(timeScale) || timeScale < 0.0 || !std::isfinite(subStepCount) ||
         subStepCount >= static_cast<double>(std::numeric_limits<std::uint64_t>::max())) {
         MGlobal::displayError("boneDynamicsNode: timeScale exceeds the representable simulation range.");
@@ -1135,7 +1118,8 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         return MS::kSuccess;
     }
 
-    // Cover the full scaled duration, dividing real elapsed seconds evenly.
+    // Preserve one dev integration step at normal playback. Acceleration
+    // covers the full scaled duration with steps no longer than a scene frame.
     const std::uint64_t numSubSteps = static_cast<std::uint64_t>(std::max(1.0, subStepCount));
     const double subDt = dtTotal / numSubSteps;
     const double dt2 = subDt * subDt;
@@ -1292,34 +1276,31 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
             stepPose.distance = (stepPose.endWorldTranslate - stepPose.boneWorldTranslate).length();
         }
         const MVector meshTip0 = step == 0 ? preOffsetPosition : m_position;
-        // velocity damping (per-second exponential decay)
-        m_velocity *= std::exp(-dynamicsParams.damping * subDt);
+        // dev: damping is the fraction removed per integration step.
+        m_velocity *= (1.0 - dynamicsParams.damping);
 
         // add velocity
         nextPosition = m_position + (m_velocity * subDt);
 
         // turbulence vector
         if (dynamicsParams.enableTurbulence) {
-            if (dynamicsParams.turbulenceSeed != m_lastSeed) {
+            // Keep dev's scene-frame seed and unscaled random-walk increments.
+            const int frame = static_cast<int>(time.as(MTime::uiUnit()));
+            if (dynamicsParams.turbulenceSeed != m_lastSeed || frame != m_lastFrame) {
+                std::uint32_t s = static_cast<std::uint32_t>(dynamicsParams.turbulenceSeed) ^
+                    (static_cast<std::uint32_t>(frame) * 0x9e3779b9u);
+                for (int i = 0; i < 4; ++i) {
+                    s = s * 1664525u + 1013904223u;
+                    m_rngState[i] = s;
+                }
                 m_lastSeed = dynamicsParams.turbulenceSeed;
-                m_turbStep = 0;
+                m_lastFrame = frame;
             }
-
-            // Init xoshiro128++ from the cumulative substep index so the
-            // sequence is deterministic and independent of the scene frame rate.
-            std::uint32_t s = static_cast<std::uint32_t>(dynamicsParams.turbulenceSeed) ^ (static_cast<std::uint32_t>(m_turbStep) * 0x9e3779b9u);
-            for (int i = 0; i < 4; ++i) {
-                s = s * 1664525u + 1013904223u;
-                m_rngState[i] = s;
-            }
-
-            // keep the per-second change magnitude at the old 30 fps level
-            const double turbScale = subDt * kRefFps;
 
             m_turbulenceVectorChange += MVector(
-                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale) * turbScale,
-                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale) * turbScale,
-                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale) * turbScale
+                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale),
+                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale),
+                mathUtils::randomDouble(m_rngState, dynamicsParams.turbulenceVectorChangeScale)
             );
 
             m_turbulenceVectorChange.x = std::max(-dynamicsParams.turbulenceVectorChangeMax, std::min(m_turbulenceVectorChange.x, dynamicsParams.turbulenceVectorChangeMax));
@@ -1328,8 +1309,6 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 
             m_turbulenceVector += m_turbulenceVectorChange;
             m_turbulenceVector.normalize();
-
-            ++m_turbStep;
         }
 
         // Forces retain their parameter values in simulation space. Scaling
@@ -1377,8 +1356,8 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
         // apply external force
         nextPosition += externalForce * dt2;
 
-        // apply stiffness (per-second exponential approach)
-        nextPosition += (m_position - nextPosition) * (1.0 - std::exp(-dynamicsParams.stiffness * subDt));
+        // dev: stiffness removes this fraction of the proposed displacement.
+        nextPosition += (m_position - nextPosition) * dynamicsParams.stiffness;
 
 
         // constraints and collisions iterations
@@ -1459,48 +1438,69 @@ MStatus boneDynamicsNode::compute(const MPlug& plug, MDataBlock& data)
 
         // Mesh contacts come last and project onto the bone-length sphere,
         // preventing the length constraint from undoing surface separation.
-        meshCollision::Sweep sweep;
-        sweep.root0 = meshRoot0 / simulationScale;
-        sweep.tip0 = meshTip0 / simulationScale;
-        sweep.root1 = stepPose.boneWorldTranslate / simulationScale;
-        sweep.tip1 = nextPosition / simulationScale;
-        sweep.rootRadius = stepPose.rootRadius / simulationScale;
-        sweep.tipRadius = stepPose.radius / simulationScale;
-        const double meshBegin = m_prevTime.as(MTime::kSeconds) + sceneDt * alpha0;
-        const double meshEnd = m_prevTime.as(MTime::kSeconds) + sceneDt * alpha1;
-        std::vector<bool> capsuleModes(sampledMeshes.size(), boneAsCapsule);
-        // Select once, before any mesh can project the tip. Every pass and final
-        // check uses this exact per-provider mode, independent of consumer order.
-        for (std::size_t i = 0; i < sampledMeshes.size(); ++i) {
-            const auto& collider = *sampledMeshes[i];
-            auto& state = m_rootFallbackStates[i];
-            if (boneAsCapsule && collider.rootOverlapFallback && iter > 0) {
-                const double scale = std::max(sweep.rootRadius + collider.contactOffset,
-                                              (sweep.tip1 - sweep.root1).length());
-                const double tolerance = scale * 1e-7;
-                const double padding = state.active ?
-                    std::max(16 * tolerance, .05 * (sweep.rootRadius + collider.contactOffset)) : -tolerance;
-                state.active = meshCollision::rootOverlaps(collider, sweep, meshBegin, meshEnd, padding);
-                capsuleModes[i] = !state.active;
-                meshRootFallbackActive |= state.active;
-            }
-        }
-        for (int pass = 0; pass < iter && !sampledMeshes.empty(); ++pass) {
+        // CCD subdivides the predicted path without reapplying forces or
+        // changing the dev damping/stiffness definitions.
+        const MVector predictedTip = nextPosition;
+        MVector correctedTip = meshTip0;
+        MVector previousPredictedTip = meshTip0;
+        const std::uint64_t collisionSteps = sampledMeshes.empty() ? 0 :
+            static_cast<std::uint64_t>(std::max(1.0, roundedUpStepCount(sceneDt / numSubSteps, 1.0 / 240.0)));
+        for (std::uint64_t collisionStep = 0; collisionStep < collisionSteps; ++collisionStep) {
+            const double fraction0 = static_cast<double>(collisionStep) / collisionSteps;
+            const double fraction1 = static_cast<double>(collisionStep + 1) / collisionSteps;
+            const MVector root0 = meshRoot0 + (stepPose.boneWorldTranslate - meshRoot0) * fraction0;
+            const MVector root1 = meshRoot0 + (stepPose.boneWorldTranslate - meshRoot0) * fraction1;
+            const MVector desiredTip = collisionStep + 1 == collisionSteps ? predictedTip :
+                meshTip0 + (predictedTip - meshTip0) * fraction1;
+            nextPosition = desiredTip + (correctedTip - previousPredictedTip);
+            if (correctedTip != previousPredictedTip)
+                distanceConstraint(root1, nextPosition, stepPose.distance);
+            meshCollision::Sweep sweep;
+            sweep.root0 = root0 / simulationScale;
+            sweep.tip0 = correctedTip / simulationScale;
+            sweep.root1 = root1 / simulationScale;
+            sweep.tip1 = nextPosition / simulationScale;
+            sweep.rootRadius = stepPose.rootRadius / simulationScale;
+            sweep.tipRadius = stepPose.radius / simulationScale;
+            const double meshBegin = m_prevTime.as(MTime::kSeconds) + sceneDt * (alpha0 + (alpha1 - alpha0) * fraction0);
+            const double meshEnd = m_prevTime.as(MTime::kSeconds) + sceneDt * (alpha0 + (alpha1 - alpha0) * fraction1);
+            std::vector<bool> capsuleModes(sampledMeshes.size(), boneAsCapsule);
+            // Select once, before any mesh can project the tip. Every pass and final
+            // check uses this exact per-provider mode, independent of consumer order.
             for (std::size_t i = 0; i < sampledMeshes.size(); ++i) {
-                MVector worldTip = nextPosition / simulationScale;
-                sweep.tip1 = worldTip;
-                sweep.capsule = capsuleModes[i];
-                const auto contact = meshCollision::solve(*sampledMeshes[i], sweep, meshBegin, meshEnd, worldTip);
-                meshCollisionUnresolved |= contact.unresolved;
-                nextPosition = worldTip * simulationScale;
+                const auto& collider = *sampledMeshes[i];
+                auto& state = m_rootFallbackStates[i];
+                if (boneAsCapsule && collider.rootOverlapFallback && iter > 0) {
+                    const double scale = std::max(sweep.rootRadius + collider.contactOffset,
+                                                  (sweep.tip1 - sweep.root1).length());
+                    const double tolerance = scale * 1e-7;
+                    const double padding = state.active ?
+                        std::max(16 * tolerance, .05 * (sweep.rootRadius + collider.contactOffset)) : -tolerance;
+                    state.active = meshCollision::rootOverlaps(collider, sweep, meshBegin, meshEnd, padding);
+                    capsuleModes[i] = !state.active;
+                    meshRootFallbackActive |= state.active;
+                }
             }
-            bool penetrating = false;
-            for (std::size_t i = 0; i < sampledMeshes.size(); ++i) {
-                sweep.capsule = capsuleModes[i];
-                penetrating |= meshCollision::penetrating(*sampledMeshes[i], sweep, meshEnd, nextPosition / simulationScale);
+            for (int pass = 0; pass < iter && !sampledMeshes.empty(); ++pass) {
+                for (std::size_t i = 0; i < sampledMeshes.size(); ++i) {
+                    MVector worldTip = nextPosition / simulationScale;
+                    sweep.tip1 = worldTip;
+                    sweep.capsule = capsuleModes[i];
+                    const auto contact = meshCollision::solve(*sampledMeshes[i], sweep, meshBegin, meshEnd, worldTip);
+                    meshCollisionUnresolved |= contact.unresolved;
+                    nextPosition = worldTip * simulationScale;
+                }
+                bool penetrating = false;
+                for (std::size_t i = 0; i < sampledMeshes.size(); ++i) {
+                    sweep.capsule = capsuleModes[i];
+                    penetrating |= meshCollision::penetrating(*sampledMeshes[i], sweep, meshEnd, nextPosition / simulationScale);
+                }
+                if (!penetrating) break;
+                if (pass == iter - 1) meshCollisionUnresolved = true;
             }
-            if (!penetrating) break;
-            if (pass == iter - 1) meshCollisionUnresolved = true;
+
+            correctedTip = nextPosition;
+            previousPredictedTip = desiredTip;
         }
 
         // update velocity, position
